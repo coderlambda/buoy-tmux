@@ -3,7 +3,6 @@ import * as path from 'node:path';
 
 const binary = path.resolve(
   __dirname,
-  'src-tauri',
   'target',
   'debug',
   process.platform === 'win32' ? 'buoy.exe' : 'buoy',

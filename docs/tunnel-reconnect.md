@@ -13,6 +13,6 @@ Session reconnect waits up to 30 seconds; tunnel readiness waits up to 10 second
 ## Validation
 
 - `npm run typecheck` and `npm test`
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib`
+- `cargo test -p buoy --lib`
 - Build the UI-test app, then `npx wdio run wdio.conf.ts`. The tunnel suite covers unopened/detached/dead/reconnecting sessions, shared reconnects, failure/retry, timeout, cancellation, secure URLs and stale status responses.
 - `python3 test/run-tunnel-readiness.py` creates disposable keys, a self-signed test certificate and a loopback-only sshd, runs three real SSH integration tests, then removes the fixture. It requires Python 3, OpenSSH client/server tools and OpenSSL. The tests cover slow startup, concurrent opens, a suspended SSH process, stable local ports, cancelled recovery and HTTPS persistence. They do not use existing SSH sessions or modify remote machines.

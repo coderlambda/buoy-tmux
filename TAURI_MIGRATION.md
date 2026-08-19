@@ -17,7 +17,7 @@ that produce a grid, not pixels — using one would mean serializing the grid ac
 our own canvas renderer, re-implementing the hardest part of xterm for no gain. So the renderer is
 unchanged; only the **backend** moved to Rust.
 
-## What moved to Rust (`src-tauri/src/`)
+## What moved to Rust (`apps/desktop/src-tauri/src/`)
 
 | Rust module | Ports from (JS) | Notes |
 |---|---|---|
@@ -33,8 +33,8 @@ unchanged; only the **backend** moved to Rust.
 | `plain_backend.rs` | `main/backends/sshTmuxBackend.js` | raw ssh+tmux stream |
 | `lib.rs` | `main/main.js` + `preload/preload.js` | Tauri commands + event emission |
 
-The renderer was initially copied verbatim, then migrated to strict TypeScript under `ui/src/`.
-`ui/src/tauri-api.ts` recreates `window.terminalAPI` over Tauri `invoke`/`listen`; Vite bundles the
+The renderer was initially copied verbatim, then migrated to strict TypeScript under `apps/desktop/ui/src/`.
+`apps/desktop/ui/src/tauri-api.ts` recreates `window.terminalAPI` over Tauri `invoke`/`listen`; Vite bundles the
 frontend while xterm remains vendored under `ui/vendor/` (CSP is `'self'`).
 
 ## IPC surface (Tauri commands)
@@ -55,7 +55,7 @@ npm run tauri:build    # release bundle
 npm run tauri:test     # Rust unit tests
 # live end-to-end (opt-in, needs a reachable host with tmux >= 3.2):
 DT_LIVE_HOST=user@host DT_TMUX=/home/u/.local/bin/tmux \
-  (cd src-tauri && cargo test --test live_control_mode -- --ignored --nocapture)
+  (cd apps/desktop/src-tauri && cargo test --test live_control_mode -- --ignored --nocapture)
 ```
 
 ## Status / verification
@@ -75,6 +75,6 @@ DT_LIVE_HOST=user@host DT_TMUX=/home/u/.local/bin/tmux \
 
 ## Still not ported (deferred)
 
-- `backpressure` ACK flow — `ack` is a no-op in `ui/src/tauri-api.ts` (webview keeps up for
+- `backpressure` ACK flow — `ack` is a no-op in `apps/desktop/ui/src/tauri-api.ts` (webview keeps up for
   interactive use). The Electron implementation is in git history (`src/shared/backpressure.js`).
 - mosh/et transports — ssh only for now (argv-verified JS backends are in git history).

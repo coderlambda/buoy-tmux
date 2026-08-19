@@ -16,12 +16,27 @@ jobs:
   rebuild:
     name: Build, verify, and replace macOS assets
     runs-on: macos-latest
+    env:
+      # Keep artifact discovery stable for both pre-workspace tags and the current root workspace.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       # Build the exact source referenced by the release rather than moving or rewriting
       # the published tag. The workflow itself is dispatched from main.
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_tag }}
+
+      - name: Resolve source layout
+        id: source-layout
+        shell: bash
+        run: |
+          if [[ -d apps/desktop/src-tauri ]]; then
+            echo "project_dir=apps/desktop" >> "$GITHUB_OUTPUT"
+            echo "cargo_workspace=. -> target" >> "$GITHUB_OUTPUT"
+          else
+            echo "project_dir=." >> "$GITHUB_OUTPUT"
+            echo "cargo_workspace=./src-tauri -> ../target" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -38,7 +53,7 @@ jobs:
       - name: Cache cargo
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: ${{ steps.source-layout.outputs.cargo_workspace }}
           key: macos-universal-release
 
       - name: Import Apple Developer ID certificate
@@ -91,9 +106,12 @@ jobs:
             exit 1
           fi
 
-          npx --yes @tauri-apps/cli@2 build \
-            --target universal-apple-darwin \
-            --bundles app,dmg
+          (
+            cd "${{ steps.source-layout.outputs.project_dir }}"
+            npx --yes @tauri-apps/cli@2 build \
+              --target universal-apple-darwin \
+              --bundles app,dmg
+          )
 
       - name: Verify architectures, signature, and notarization
         id: verify
@@ -101,9 +119,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          app_path="$GITHUB_WORKSPACE/src-tauri/target/universal-apple-darwin/release/bundle/macos/Buoy.app"
+          app_path="$GITHUB_WORKSPACE/target/universal-apple-darwin/release/bundle/macos/Buoy.app"
           binary_path="$app_path/Contents/MacOS/buoy"
-          dmg_path="$(find "$GITHUB_WORKSPACE/src-tauri/target/universal-apple-darwin/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
+          dmg_path="$(find "$GITHUB_WORKSPACE/target/universal-apple-darwin/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
 
           test -d "$app_path"
           test -f "$binary_path"

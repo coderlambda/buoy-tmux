@@ -1,5 +1,6 @@
 node_modules/
-dist/
+apps/desktop/dist/
+apps/mobile/dist/
 *.log
 .DS_Store
 ._*
@@ -11,6 +12,9 @@ AuthKey_*.p8
 certificate-base64.txt
 
 # Rust / Tauri build artifacts
-src-tauri/target/
-src-tauri/gen/schemas/
-src-tauri/src/ui_test_init.js
+/target/
+apps/desktop/src-tauri/gen/
+apps/mobile/src-tauri/gen/schemas/
+apps/mobile/src-tauri/gen/android/.gradle/
+apps/mobile/src-tauri/gen/android/local.properties
+apps/desktop/src-tauri/src/ui_test_init.js

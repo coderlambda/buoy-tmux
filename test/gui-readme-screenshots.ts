@@ -1,6 +1,6 @@
 // Deterministic, privacy-safe product screenshots for README.md. This suite is intentionally
 // excluded from wdio.conf.ts: run `npm run screenshots:readme` only when the documented UI changes.
-import type { SessionMeta } from '../ui/src/types.js';
+import type { SessionMeta } from '../apps/desktop/ui/src/types.js';
 import {
   fire, js, loadFixture, screenshotIfRequested, session,
 } from './tauri-ui-harness.js';

@@ -1,0 +1,184 @@
+interface XtermBufferLine {
+  readonly isWrapped: boolean;
+  translateToString(trimRight?: boolean): string;
+  getCell(index: number): {
+    getChars(): string;
+    isUnderline(): boolean | number;
+  } | undefined;
+}
+
+interface XtermBuffer {
+  readonly length: number;
+  readonly baseY: number;
+  readonly viewportY: number;
+  readonly cursorX: number;
+  readonly cursorY: number;
+  getLine(index: number): XtermBufferLine | undefined;
+}
+
+interface XtermLink {
+  range: {
+    start: { x: number; y: number };
+    end: { x: number; y: number };
+  };
+  text: string;
+  decorations?: { underline?: boolean; pointerCursor?: boolean };
+  activate(event: MouseEvent, text: string): void;
+  hover?(event: MouseEvent, text: string): void;
+  leave?(event: MouseEvent, text: string): void;
+}
+
+interface XtermLinkProvider {
+  provideLinks(lineNumber: number, callback: (links: XtermLink[] | undefined) => void): void;
+}
+
+interface XtermTerminal {
+  options?: XtermTerminalOptions;
+  readonly cols: number;
+  readonly rows: number;
+  readonly buffer: { active: XtermBuffer };
+  readonly parser?: { registerOscHandler(code: number, callback: (payload: string) => boolean): unknown };
+  loadAddon(addon: unknown): void;
+  registerLinkProvider(provider: XtermLinkProvider): void;
+  onData(callback: (data: string) => void): unknown;
+  onBell?(callback: () => void): unknown;
+  attachCustomKeyEventHandler(callback: (event: KeyboardEvent) => boolean): void;
+  getSelection(): string;
+  hasSelection(): boolean;
+  clearSelection(): void;
+  open(element: HTMLElement): void;
+  input(data: string, wasUserInput?: boolean): void;
+  write(data: string, callback?: () => void): void;
+  resize(cols: number, rows: number): void;
+  /** Re-render rows start..end of the current buffer. */
+  refresh(start: number, end: number): void;
+  focus(): void;
+  blur(): void;
+  dispose(): void;
+}
+
+interface XtermTerminalOptions {
+  allowProposedApi?: boolean;
+  fontFamily?: string;
+  fontSize?: number;
+  lineHeight?: number;
+  rescaleOverlappingGlyphs?: boolean;
+  theme?: { background?: string; foreground?: string; cursor?: string; cursorAccent?: string; green?: string; selectionBackground?: string;
+    black?: string; red?: string; yellow?: string; blue?: string; magenta?: string; cyan?: string; white?: string;
+    brightBlack?: string; brightRed?: string; brightGreen?: string; brightYellow?: string;
+    brightBlue?: string; brightMagenta?: string; brightCyan?: string; brightWhite?: string };
+  scrollback?: number;
+  linkHandler?: unknown;
+}
+
+declare const Terminal: new (options?: XtermTerminalOptions) => XtermTerminal;
+declare namespace FitAddon {
+  class FitAddon {
+    fit(): void;
+  }
+}
+declare namespace CanvasAddon {
+  class CanvasAddon {
+    dispose(): void;
+    clearTextureAtlas(): void;
+  }
+}
+
+interface XtermSearchOptions {
+  caseSensitive?: boolean;
+  wholeWord?: boolean;
+  incremental?: boolean;
+  decorations?: {
+    matchBackground?: string;
+    matchBorder?: string;
+    matchOverviewRuler: string;
+    activeMatchBackground?: string;
+    activeMatchBorder?: string;
+    activeMatchColorOverviewRuler: string;
+  };
+}
+declare namespace SearchAddon {
+  class SearchAddon {
+    constructor(options?: { highlightLimit?: number });
+    findNext(text: string, options?: XtermSearchOptions): boolean;
+    findPrevious(text: string, options?: XtermSearchOptions): boolean;
+    clearDecorations(): void;
+    onDidChangeResults(callback: (results: { resultIndex: number; resultCount: number }) => void): { dispose(): void };
+    dispose(): void;
+  }
+}
+
+interface TauriEvent<T> { payload: T }
+interface TauriCore {
+  invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+}
+interface TauriEvents {
+  listen<T>(event: string, callback: (event: TauriEvent<T>) => void): Promise<() => void>;
+}
+
+interface RendererWriteBenchmark {
+  bytes: number;
+  lines: number;
+  parseMs: number;
+  totalMs: number;
+}
+
+interface RendererFrameBenchmark {
+  frames: number;
+  meanMs: number;
+  p95Ms: number;
+  maxMs: number;
+}
+
+interface Window {
+  __TAURI__: { core: TauriCore; event: TauriEvents };
+  __BUOY_UI_TEST__?: {
+    invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+    listen<T>(event: string, callback: (event: TauriEvent<T>) => void): Promise<() => void>;
+  };
+  terminalAPI: import('./types.js').TerminalAPI;
+  dtPlugins: {
+    registerLink: import('./plugins.js').PluginRegistry['registerLink'];
+    registerTabKind: import('./plugins.js').PluginRegistry['registerTabKind'];
+  };
+  __testType(data: string): void;
+  __testInputReady(): boolean;
+  __testMount(id: string): void;
+  __testDispose(id: string): void;
+  __testReadBuffer(): string;
+  __testTextIsUnderlined(text: string): boolean | null;
+  __testFindText(text: string): {
+    x: number;
+    y: number;
+    isWrapped: boolean;
+    underlined: boolean;
+  } | null;
+  __testTabTerminalSizes(): Array<{
+    winId: string;
+    cols: number;
+    rows: number;
+    active: boolean;
+  }>;
+  __testLinkPath(text: string): string | null;
+  __testRepaintCount(): number;
+  __testRendererKind(): string | null;
+  __testBenchmarkWrite(lines: number): Promise<RendererWriteBenchmark>;
+  __testBenchmarkFrames(frames: number): Promise<RendererFrameBenchmark>;
+  __testArmInputLatency(): void;
+  __testSendInput(data: string): void;
+  __testInputLatency(): number | null;
+  __testTerminalState(): {
+    theme?: XtermTerminalOptions['theme'];
+    cols: number;
+    rows: number;
+    cursorX: number;
+    cursorY: number;
+    baseY: number;
+    viewportY: number;
+    selection: string;
+    line: string;
+    previous: string;
+    next: string;
+  } | null;
+  __testReset(): Promise<void>;
+}

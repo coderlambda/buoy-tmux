@@ -1,0 +1,16 @@
+{
+  "name": "@buoy/desktop",
+  "version": "0.1.4",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "dev:frontend": "vite --config vite.config.ts",
+    "build": "tauri build",
+    "build:frontend": "vite build --config vite.config.ts",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml --lib"
+  },
+  "dependencies": {
+    "@buoy/contracts": "*"
+  }
+}

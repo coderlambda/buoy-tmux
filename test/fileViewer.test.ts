@@ -12,8 +12,8 @@ import {
   TEXT_RENDER_CAP,
   IMAGE_RENDER_CAP,
   HTML_RENDER_CAP,
-} from '../ui/src/fileViewerTab.js';
-import type { FileViewerApi } from '../ui/src/fileViewerTab.js';
+} from '../apps/desktop/ui/src/fileViewerTab.js';
+import type { FileViewerApi } from '../apps/desktop/ui/src/fileViewerTab.js';
 
 const bytesOf = (s: string): Uint8Array => new TextEncoder().encode(s);
 

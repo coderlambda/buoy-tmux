@@ -1,7 +1,7 @@
 
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { decodeOsc52 } from '../ui/src/terminalTab.js';
+import { decodeOsc52 } from '../apps/desktop/ui/src/terminalTab.js';
 
 // OSC 52 is the standard "set the system clipboard" escape: ESC ] 52 ; <sel> ; <base64> ST.
 // xterm.js ignores it by default, so the terminal tab opts in and routes the decoded text to the

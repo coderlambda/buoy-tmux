@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { isTerminalFindShortcut } from '../ui/src/terminalSearch.js';
+import { isTerminalFindShortcut } from '../apps/desktop/ui/src/terminalSearch.js';
 
 const key = { key: 'f', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, isComposing: false };
 test('find shortcuts support each platform without consuming macOS shell Ctrl+F', () => {

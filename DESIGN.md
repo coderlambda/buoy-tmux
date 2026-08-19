@@ -5,7 +5,9 @@
 
 **Status:** Draft · **Date:** 2026-07-09
 
-> **Code layout note (2026-08-04):** the app is now Tauri + Rust (`src-tauri/` + `ui/`);
+> **Code layout note (2026-09-29):** desktop and mobile are independent Tauri packages under
+> `apps/desktop` and `apps/mobile`; shared contracts and Rust code live under `packages/` and
+> `crates/`.
 > the Electron MVP this doc's earlier sections were written against has been deleted
 > (git history and `main` have it). Where a section cites an old `src/…/*.js` path, the
 > module lives on as its Rust port — see the table in `TAURI_MIGRATION.md`.
@@ -946,9 +948,9 @@ A small, in-process extension framework so features are contributed, not hardcod
 extension point: **link matchers** (clickable URLs/paths and beyond).
 
 ### Architecture
-- `ui/src/plugins.ts` — `PluginRegistry` (PURE, unit-tested): holds registered link
+- `apps/desktop/ui/src/plugins.ts` — `PluginRegistry` (PURE, unit-tested): holds registered link
   plugins and a `findMatches(line)` engine (priority-ordered, non-overlapping).
-- `ui/src/builtinPlugins.ts` — the built-in **url** and **path** plugins, written
+- `apps/desktop/ui/src/builtinPlugins.ts` — the built-in **url** and **path** plugins, written
   against the same public API a third party would use (examples as much as features).
 - Renderer wires the registry into an xterm `registerLinkProvider` per terminal; a match's
   `activate` calls the plugin's `onClick(text, ctx)`.
@@ -1081,7 +1083,7 @@ window.dtPlugins.registerTabKind({
   create(spec, ctx) { /* return a TabContent */ },
 });   // -> unregister()
 ```
-- Built-in: **'terminal'** (`ui/src/terminalTab.ts`) wraps xterm.js as a TabContent —
+- Built-in: **'terminal'** (`apps/desktop/ui/src/terminalTab.ts`) wraps xterm.js as a TabContent —
   the reference implementation.
 - The project/tab code creates content via `registry.createTabContent(kind, spec, ctx)` and
   manages mount/show-hide/dispose generically. A non-terminal kind simply doesn't wire to a
@@ -1217,7 +1219,7 @@ path, never a remembered preference — turns scripts on, for **that one documen
   for app-origin XSS. Instead `enable_html_scripts` stashes the bytes under a random 128-bit token
   and returns `buoyhtml://localhost/<token>`; `register_uri_scheme_protocol` serves it as its **own
   origin** with its own per-response `Content-Security-Policy`, so the permission applies to that
-  document alone. See `src-tauri/src/html_preview.rs`.
+  document alone. See `apps/desktop/src-tauri/src/html_preview.rs`.
 - **What the preview CSP grants** (and nothing else): `default-src 'none'` as the base, then
   `script-src 'unsafe-inline' 'unsafe-eval' https:`, `style-src`/`font-src`/`img-src`/`media-src`/
   `connect-src` over `https:` (+ `data:`/`blob:` where relevant). No `'self'`, no plaintext `http:`,
@@ -1277,7 +1279,7 @@ exists as the opt-in above.)
 
 Makes `ls`-style output clickable and opens relatives correctly.
 
-- **Matcher (`ui/src/builtinPlugins.ts`):** besides slash paths + `~//./..`, also match bare filenames
+- **Matcher (`apps/desktop/ui/src/builtinPlugins.ts`):** besides slash paths + `~//./..`, also match bare filenames
   **with an extension** (`README.md`), relative paths with an interior slash + extension
   (`src/main.rs`), and known extension-less names (`Makefile`, `Dockerfile`, `LICENSE`, `README`).
   Plain words (no slash, no extension, not known) stay unmatched to avoid underlining noise.
@@ -1486,7 +1488,7 @@ Project rename treats empty as **cancel** (a project must keep a label). Tab ren
 sends on any change from current, including to `""`.
 
 ### Testing (`test/gui-rename.ts`, real Tauri platform webview, 41 checks)
-Loads the **real** Vite build of `ui/index.html`, `ui/src/tauri-api.ts`, and `ui/src/renderer.ts` in a test-only Tauri binary,
+Loads the **real** Vite build of `apps/desktop/ui/index.html`, `apps/desktop/ui/src/tauri-api.ts`, and `apps/desktop/ui/src/renderer.ts` in a test-only Tauri binary,
 then drives the interaction through the embedded Tauri WebDriver. It is not in the `npm test` glob
 (`test/*.test.ts`); run it directly:
 
@@ -1548,7 +1550,7 @@ rewrite below costs nothing and leaves native config and capabilities untouched.
 
 ### The fix: implement dragging on pointer events
 Pointer events are ordinary input; the native drag machinery never sees them. So `wirePointerDrag`
-in `ui/src/renderer.ts` drives the gesture directly, shared by the project list (`axis: 'y'`) and the tab
+in `apps/desktop/ui/src/renderer.ts` drives the gesture directly, shared by the project list (`axis: 'y'`) and the tab
 strip (`axis: 'x'`):
 
 ```
@@ -1633,8 +1635,8 @@ On the same measurement the clear is redundant in Chromium (no caret is set at a
 
 ### Testing (`test/gui-reorder.ts`, real Tauri platform webview, 48 checks)
 Same shape as §23's suite and for the same reason: the gesture's difficulty is event sequencing and
-hit-testing. WebdriverIO drives down / move × 8 / up sequences against the real `ui/index.html` +
-`ui/src/renderer.ts` in Tauri's native webview. The macOS embedded driver currently emits native mouse
+hit-testing. WebdriverIO drives down / move × 8 / up sequences against the real `apps/desktop/ui/index.html` +
+`apps/desktop/ui/src/renderer.ts` in Tauri's native webview. The macOS embedded driver currently emits native mouse
 events without WebKit's usual PointerEvent promotion, so the suite supplies that narrow test-only
 promotion after native hit-testing. Not in the `npm test` glob:
 

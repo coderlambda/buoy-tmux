@@ -228,16 +228,16 @@ not reuse this OSC dot as proof that a real agent issued a permission request.
 - `ui/builtinPlugins.js` owns the pure streaming parser and OSC classification.
 - `ui/terminalTab.js` forwards xterm's standalone BEL event.
 - `ui/renderer.js` owns per-tab unread state, session aggregation, and acknowledgement behavior.
-- `src-tauri/src/validation.rs` enables tmux focus events on every local/remote attach.
-- `src-tauri/src/claude_integration.rs` provisions the scoped Claude Code launcher/plugin bundle and
+- `apps/desktop/src-tauri/src/validation.rs` enables tmux focus events on every local/remote attach.
+- `apps/desktop/src-tauri/src/claude_integration.rs` provisions the scoped Claude Code launcher/plugin bundle and
   post-startup zsh/bash/fish/POSIX integration locally and over SSH while preserving explicit user
   configuration. The remote bootstrap is decoded inside command substitution and passed as
   `/bin/sh -c`'s argument—not piped into the shell's stdin—so the final tmux `exec` retains the pty
   allocated by `ssh -tt` and can start its control handshake.
-- `src-tauri/src/transport.rs` exposes the shell launcher, real shell identity, session identity,
+- `apps/desktop/src-tauri/src/transport.rs` exposes the shell launcher, real shell identity, session identity,
   initial launcher PATH, and Buoy marker to local tmux windows. The initial PATH remains a fallback;
   the post-startup integration is authoritative.
-- `ui/index.html` owns the shared dot styling.
+- `apps/desktop/ui/index.html` owns the shared dot styling.
 - `test/plugins.test.js` covers protocol classification and arbitrary chunk boundaries.
 - `test/gui-notifications.js` covers the real renderer behavior and DOM rollup/clearing rules.
 

@@ -7,5 +7,5 @@
     "noEmit": true,
     "types": ["node", "@wdio/globals/types", "@wdio/mocha-framework"]
   },
-  "include": ["test/**/*.ts", "wdio.conf.ts", "ui/src/globals.d.ts"]
+  "include": ["test/**/*.ts", "wdio.conf.ts", "apps/desktop/ui/src/globals.d.ts"]
 }

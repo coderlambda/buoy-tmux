@@ -1,6 +1,7 @@
 # Test Plan
 
-The app is Tauri + Rust (`src-tauri/`) with a strict TypeScript frontend (`ui/src/`). The Electron MVP
+The app is a Cargo/npm workspace with desktop and mobile Tauri packages under `apps/` and a strict
+TypeScript frontend (`apps/desktop/ui/src/`). The Electron MVP
 and its original JavaScript test suites were deleted when the migration completed (git history has both; the
 old plan's TC-V/TC-B/TC-S/TC-P/TC-L case lists went with them — their Rust ports below carry
 their own case IDs). Tests are split by what runs **headless & deterministically** here vs.
@@ -10,26 +11,26 @@ what needs a **live remote** (opt-in `#[ignore]`d suites).
 
 | Layer | Module | Test kind | Runnable here? |
 |---|---|---|---|
-| Input validation / argv build | `src-tauri/src/validation.rs` | pure unit | ✅ |
-| Reconnect supervisor (state machine) | `src-tauri/src/supervisor.rs` | unit w/ fake backend + fake clock | ✅ |
+| Input validation / argv build | `apps/desktop/src-tauri/src/validation.rs` | pure unit | ✅ |
+| Reconnect supervisor (state machine) | `apps/desktop/src-tauri/src/supervisor.rs` | unit w/ fake backend + fake clock | ✅ |
 | Control-mode protocol + topology | `control_parser.rs`, `window_registry.rs`, `reply_channel.rs`, `tmux_keys.rs` | pure unit | ✅ |
-| Session persistence | `src-tauri/src/session_store.rs` | unit (tmp dir) | ✅ |
-| Local tmux backend | `src-tauri/src/local_backend.rs` | integration (real pty + real tmux) | ✅ |
-| Tunnels / sticky ports | `src-tauri/src/tunnel.rs` | unit (real sockets, no remote) | ✅ |
-| Frontend modules (clipboard, file viewer, link plugins, TUI detection) | `ui/src/*.ts` | TypeScript unit (`npm test`) | ✅ |
-| Full GUI (rename, reorder, notifications, new-session form, repaint, Canvas fallback, scroll ownership) | `ui/index.html` + `ui/src/renderer.ts` | real Tauri platform webview + WebDriver | ✅ |
-| Real ssh+tmux end-to-end | `src-tauri/tests/live_*.rs` | live host, `#[ignore]`d | ❌ needs `DT_LIVE_HOST` |
+| Session persistence | `apps/desktop/src-tauri/src/session_store.rs` | unit (tmp dir) | ✅ |
+| Local tmux backend | `apps/desktop/src-tauri/src/local_backend.rs` | integration (real pty + real tmux) | ✅ |
+| Tunnels / sticky ports | `apps/desktop/src-tauri/src/tunnel.rs` | unit (real sockets, no remote) | ✅ |
+| Frontend modules (clipboard, file viewer, link plugins, TUI detection) | `apps/desktop/ui/src/*.ts` | TypeScript unit (`npm test`) | ✅ |
+| Full GUI (rename, reorder, notifications, new-session form, repaint, Canvas fallback, scroll ownership) | `apps/desktop/ui/index.html` + `apps/desktop/ui/src/renderer.ts` | real Tauri platform webview + WebDriver | ✅ |
+| Real ssh+tmux end-to-end | `apps/desktop/src-tauri/tests/live_*.rs` | live host, `#[ignore]`d | ❌ needs `DT_LIVE_HOST` |
 
 Deferred with the feature: backpressure watermarks (the `ack` bridge call is a no-op in the
 Tauri port; the Electron-era module and its TC-B suite are in git history).
 
 ---
 
-## TypeScript unit tests (`npm test` — the `ui/src/` frontend modules)
+## TypeScript unit tests (`npm test` — the `apps/desktop/ui/src/` frontend modules)
 
-- **clipboard.test.ts** — OSC 52 / clipboard handling in `ui/src/terminalTab.ts`.
-- **fileViewer.test.ts** — markdown/table/HTML-preview rendering in `ui/src/fileViewerTab.ts` (§16).
-- **plugins.test.ts** — `ui/src/plugins.ts` registry + `ui/src/builtinPlugins.ts` link detection
+- **clipboard.test.ts** — OSC 52 / clipboard handling in `apps/desktop/ui/src/terminalTab.ts`.
+- **fileViewer.test.ts** — markdown/table/HTML-preview rendering in `apps/desktop/ui/src/fileViewerTab.ts` (§16).
+- **plugins.test.ts** — `apps/desktop/ui/src/plugins.ts` registry + `apps/desktop/ui/src/builtinPlugins.ts` link detection
   (URLs, paths, OSC 8, loopback-URL routing, §17–18), plus streaming OSC 9/99/777
   notification parsing (`OSC_NOTIFICATIONS_DESIGN.md`) and TC-T1…T9 repaint-in-place/TUI activity
   detection. The TUI cases include raw Claude Code and plain-zsh captures, split CSI delivery,
@@ -37,7 +38,7 @@ Tauri port; the Electron-era module and its TC-B suite are in git history).
 
 ---
 
-## Rust unit tests (`cd src-tauri && cargo test --lib`)
+## Rust unit tests (`cd apps/desktop/src-tauri && cargo test --lib`)
 
 ### TC-TP — Sticky `ssh -L` local ports (`src/tunnel.rs`, DESIGN.md §18)
 A forwarded URL names one specific `localhost:<local>`. These pin the rule that the number never
@@ -120,7 +121,7 @@ Run this suite alone with:
 npm run gui-rename
 ```
 
-Loads the real Vite build of `ui/index.html` + `ui/src/renderer.ts` through the production Tauri adapter and drives the
+Loads the real Vite build of `apps/desktop/ui/index.html` + `apps/desktop/ui/src/renderer.ts` through the production Tauri adapter and drives the
 first click through native WebDriver input. The embedded WKWebView driver does not synthesize the
 second click/double-click detail, so the harness completes that OS event sequence in-page after the
 native first click; this retains the click/rerender/double-click ordering that pins the original bug.
@@ -247,13 +248,13 @@ The Rust suite adds six Claude Code provisioning guards:
 
 ---
 
-## Live suites (`src-tauri/tests/live_*.rs`, real hosts, opt-in)
+## Live suites (`apps/desktop/src-tauri/tests/live_*.rs`, real hosts, opt-in)
 
 `live_local_tmux` runs unconditionally in `cargo test` (needs only a local tmux). The rest
 are `#[ignore]`d and need `DT_LIVE_HOST=user@host` (and where noted `DT_TMUX=/path/to/tmux`):
 
 ```
-cd src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --nocapture
+cd apps/desktop/src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --nocapture
 ```
 
 - **live_control_mode** — connect, second tab, per-window output isolation, tab re-visit.
@@ -332,7 +333,7 @@ cd src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --n
 - `remote_codex_upload` (opt-in): a private Codex composer on an explicitly selected SSH host.
   Set `BUOY_CODEX_UPLOAD_META` to a SessionMeta JSON (host, session, mode, tmuxPath, socketName),
   `BUOY_CODEX_UPLOAD_WINDOW` to its window id, and `BUOY_CODEX_UPLOAD_CWD` to its temporary cwd;
-  run `cargo test --manifest-path src-tauri/Cargo.toml --test remote_codex_upload -- --ignored --nocapture`.
+  run `cargo test -p buoy --test remote_codex_upload -- --ignored --nocapture`.
   Use an empty composer in a disposable session, because this adds a draft and uploads fixtures.
   The test never submits a prompt.
 - Verified on 2026-09-21 over Tailscale SSH to Ubuntu 24.04, tmux 3.4 and Codex CLI 0.153.4:

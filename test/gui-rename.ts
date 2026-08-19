@@ -1,6 +1,6 @@
 
 // GUI test for inline rename (sidebar project + control-mode tab), driven through the real Tauri
-// webview and WebDriver's native pointer/key input against ui/src/renderer.ts and ui/index.html.
+// webview and WebDriver's native pointer/key input against apps/desktop/ui/src/renderer.ts and apps/desktop/ui/index.html.
 //
 // Why a full-GUI test and not a unit test: the bug is an event-ORDERING one. A double-click delivers
 // click, click, dblclick — and the renderer's row `onclick` calls mount(), which calls
