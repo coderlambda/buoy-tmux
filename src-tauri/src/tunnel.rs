@@ -10,8 +10,8 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::validation::{parse_host, ValidationError};
 
@@ -22,10 +22,19 @@ pub struct TunnelStatus {
     pub remote: u16,
     pub local: Option<u16>,
     pub active: bool,
+    pub scheme: TunnelScheme,
 }
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelScheme { #[default] Http, Https }
+impl TunnelScheme {
+    pub fn as_str(self) -> &'static str { match self { Self::Http => "http", Self::Https => "https" } }
+}
+
 /// A parsed loopback URL: the remote port to reach and the path (incl. query) to open.
 #[derive(Debug, PartialEq)]
 pub struct LoopbackUrl {
+    pub scheme: TunnelScheme,
     pub port: u16,
     pub path: String, // begins with '/', includes any ?query; '' -> "/"
 }
@@ -40,7 +49,7 @@ pub fn classify_loopback(url: &str, loopback_hosts: &[String]) -> Option<(String
         .or_else(|| url.strip_prefix("https://"))
         .unwrap_or(url);
     // authority is up to the first '/', '?' or end.
-    let auth_end = rest.find(|c| c == '/' || c == '?').unwrap_or(rest.len());
+    let auth_end = rest.find(|c| c == '/' || c == '?' || c == '#').unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let mut tail = &rest[auth_end..];
     if tail.is_empty() { tail = "/"; }
@@ -58,7 +67,7 @@ pub fn classify_loopback(url: &str, loopback_hosts: &[String]) -> Option<(String
     if path.chars().any(|c| c.is_control() || c == ' ') {
         return None;
     }
-    Some((host.to_string(), LoopbackUrl { port, path }))
+    Some((host.to_string(), LoopbackUrl { port, path, scheme: if url.starts_with("https://") { TunnelScheme::Https } else { TunnelScheme::Http } }))
 }
 
 /// Pick a free local TCP port by binding to 127.0.0.1:0 and reading the assigned port. There's an
@@ -107,7 +116,14 @@ fn tunnel_argv(host: &str, local_port: u16, remote_port: u16, base_args: &[Strin
     args.extend([
         "-o".into(), "BatchMode=yes".into(),
         "-o".into(), "ExitOnForwardFailure=yes".into(),
-        "-o".into(), "ServerAliveInterval=30".into(),
+        "-o".into(), "ConnectTimeout=8".into(),
+        "-o".into(), "ServerAliveInterval=10".into(),
+        "-o".into(), "ServerAliveCountMax=2".into(),
+        // This registry owns and checks the child. Do not let user multiplex/background settings
+        // move the listener into another process whose lifetime we cannot control.
+        "-o".into(), "ControlMaster=no".into(),
+        "-o".into(), "ControlPath=none".into(),
+        "-o".into(), "ForkAfterAuthentication=no".into(),
         "-N".into(),
         // bind the LOCAL side to 127.0.0.1 so only this machine can use the forward.
         "-L".into(), format!("127.0.0.1:{}:localhost:{}", local_port, remote_port),
@@ -130,8 +146,14 @@ struct Tunnel {
 impl Tunnel {
     fn kill(&mut self) {
         match self.child.as_mut() {
-            Some(c) => { let _ = c.kill(); }
-            None if self.pid != 0 => { let _ = Command::new("kill").arg(self.pid.to_string()).status(); }
+            Some(c) => { let _ = c.kill(); let _ = c.wait(); }
+            None if is_our_ssh_pid(self.pid, self.local_port, self.remote_port) => {
+                let _ = Command::new("kill").arg(self.pid.to_string()).status();
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while is_our_ssh_pid(self.pid, self.local_port, self.remote_port) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
             None => {}
         }
     }
@@ -139,7 +161,7 @@ impl Tunnel {
     fn alive(&mut self) -> bool {
         match self.child.as_mut() {
             Some(c) => matches!(c.try_wait(), Ok(None)),
-            None => is_our_ssh_pid(self.pid),
+            None => is_our_ssh_pid(self.pid, self.local_port, self.remote_port),
         }
     }
 }
@@ -148,15 +170,29 @@ impl Tunnel {
 /// back. A plain TCP connect is NOT enough — ssh's local listener accepts before forwarding, so a
 /// dead remote port still "connects" (verified). Only an actual round-trip distinguishes them.
 pub fn probe_local_port(local_port: u16) -> bool {
+    probe_forward(local_port, local_port, TunnelScheme::Http)
+}
+
+fn probe_forward(local_port: u16, remote_port: u16, scheme: TunnelScheme) -> bool {
     let addr = format!("127.0.0.1:{}", local_port);
     let stream = TcpStream::connect_timeout(
         &addr.parse().unwrap(), Duration::from_millis(600));
     let mut s = match stream { Ok(s) => s, Err(_) => return false };
     let _ = s.set_read_timeout(Some(Duration::from_millis(700)));
     let _ = s.set_write_timeout(Some(Duration::from_millis(500)));
-    // A bare HEAD; we don't care about the status, only that SOMETHING answers (dead remote ->
-    // ssh closes/refuses the forwarded channel -> read returns 0/err).
-    if s.write_all(b"HEAD / HTTP/1.0\r\n\r\n").is_err() { return false; }
+    if scheme == TunnelScheme::Https {
+        // Reachability only: dev servers commonly use self-signed certificates. This handshake
+        // carries no credentials/content; the browser still performs its normal certificate checks.
+        let connector = match native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true).build() {
+            Ok(connector) => connector, Err(_) => return false,
+        };
+        return connector.connect("localhost", s).is_ok();
+    }
+    // A TCP accept only proves ssh's local listener exists. Require a remote response, including
+    // 4xx/5xx: availability of the user's application is separate from a healthy forwarding path.
+    let request = format!("HEAD / HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n", remote_port);
+    if s.write_all(request.as_bytes()).is_err() { return false; }
     let mut buf = [0u8; 16];
     matches!(s.read(&mut buf), Ok(n) if n > 0)
 }
@@ -169,11 +205,12 @@ pub fn probe_local_port(local_port: u16) -> bool {
 // orphan (same pid still forwarding our local->remote) instead of leaking it — so ports are reused,
 // not duplicated. We only kill on explicit close or app exit.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct PortRec { remote: u16, #[serde(default)] local: u16, #[serde(default)] pid: u32 }
+struct PortRec { remote: u16, #[serde(default)] local: u16, #[serde(default)] pid: u32, #[serde(default)] scheme: TunnelScheme }
 
 type Persisted = BTreeMap<String, Vec<PortRec>>;
 
 pub struct TunnelRegistry {
+    operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     // session id -> (remote_port -> Tunnel)
     by_session: Mutex<HashMap<String, HashMap<u16, Tunnel>>>,
     // session id -> persisted port records (remote port + last ssh -L pid); source of truth for
@@ -189,6 +226,7 @@ impl Default for TunnelRegistry {
 impl TunnelRegistry {
     pub fn new() -> Self {
         TunnelRegistry {
+            operations: Mutex::new(HashMap::new()),
             by_session: Mutex::new(HashMap::new()),
             persisted: Mutex::new(BTreeMap::new()),
             store_path: None,
@@ -207,7 +245,7 @@ impl TunnelRegistry {
         let mut adopted: HashMap<String, HashMap<u16, Tunnel>> = HashMap::new();
         for (sid, recs) in persisted.iter_mut() {
             for r in recs.iter_mut() {
-                if r.pid != 0 && r.local != 0 && is_our_ssh_pid(r.pid) {
+                if r.pid != 0 && r.local != 0 && is_our_ssh_pid(r.pid, r.local, r.remote) {
                     // Orphan is still alive and forwarding — adopt it (reuse across restarts).
                     crate::dlog!("tunnel: adopting orphan pid={} local {} -> remote {} for {}", r.pid, r.local, r.remote, sid);
                     adopted.entry(sid.clone()).or_default()
@@ -218,6 +256,7 @@ impl TunnelRegistry {
             }
         }
         let reg = TunnelRegistry {
+            operations: Mutex::new(HashMap::new()),
             by_session: Mutex::new(adopted),
             persisted: Mutex::new(persisted),
             store_path: Some(path),
@@ -243,12 +282,10 @@ impl TunnelRegistry {
         let recs = p.entry(session_id.to_string()).or_default();
         match recs.iter_mut().find(|r| r.remote == remote_port) {
             Some(r) => { r.local = local_port; r.pid = pid; }
-            None => recs.push(PortRec { remote: remote_port, local: local_port, pid }),
+            None => recs.push(PortRec { remote: remote_port, local: local_port, pid, scheme: TunnelScheme::Http }),
         }
         recs.sort_by_key(|r| r.remote);
-        let snapshot = p.clone();
-        drop(p);
-        self.save_persisted(&snapshot);
+        self.save_persisted(&p);
     }
 
     /// The LOCAL port this (session, remote port) was last forwarded on, if we've ever forwarded it.
@@ -266,9 +303,7 @@ impl TunnelRegistry {
             recs.retain(|r| r.remote != remote_port);
             if recs.is_empty() { p.remove(session_id); }
         }
-        let snapshot = p.clone();
-        drop(p);
-        self.save_persisted(&snapshot);
+        self.save_persisted(&p);
     }
 
     /// The persisted+live status of a session's forwarded ports, for the sidebar. Each remote port
@@ -287,8 +322,9 @@ impl TunnelRegistry {
 
         ports.into_iter().map(|remote| {
             let local = live_map.get(&remote).copied();
-            let active = match local { Some(lp) => probe_local_port(lp), None => false };
-            TunnelStatus { remote, local, active }
+            let scheme = self.remembered_scheme(session_id, remote);
+            let active = match local { Some(lp) => probe_forward(lp, remote, scheme), None => false };
+            TunnelStatus { remote, local, active, scheme }
         }).collect()
     }
 
@@ -298,6 +334,12 @@ impl TunnelRegistry {
     pub fn ensure(&self, session_id: &str, host: &str, remote_port: u16, base_args: &[String])
         -> Result<u16, String>
     {
+        let operation = self.operation(session_id);
+        let _guard = operation.lock().unwrap();
+        self.ensure_locked(session_id, host, remote_port, base_args)
+    }
+
+    fn ensure_locked(&self, session_id: &str, host: &str, remote_port: u16, base_args: &[String]) -> Result<u16, String> {
         // Reuse a live tunnel.
         {
             let mut map = self.by_session.lock().unwrap();
@@ -325,11 +367,13 @@ impl TunnelRegistry {
     /// ones that just died. Already-alive tunnels are left alone (`ensure` reuses them), so this is
     /// safe to call on every reconnect. Returns the (remote, local) pairs now forwarding.
     pub fn reestablish(&self, session_id: &str, host: &str, base_args: &[String]) -> Vec<(u16, u16)> {
+        let operation = self.operation(session_id);
+        let _guard = operation.lock().unwrap();
         let wanted: Vec<u16> = self.persisted.lock().unwrap()
             .get(session_id).map(|recs| recs.iter().map(|r| r.remote).collect()).unwrap_or_default();
         let mut out = Vec::new();
         for remote in wanted {
-            match self.ensure(session_id, host, remote, base_args) {
+            match self.ensure_locked(session_id, host, remote, base_args) {
                 Ok(local) => {
                     crate::dlog!("tunnel: reestablished remote {} on local {} for {}", remote, local, session_id);
                     out.push((remote, local));
@@ -342,6 +386,23 @@ impl TunnelRegistry {
         out
     }
 
+    /// Production reconnect path: repair half-open SSH children too. Check cancellation after
+    /// acquiring the same lock used by close/detach so a stale reconnect worker cannot revive them.
+    pub fn restore_ready_if(&self, session_id: &str, host: &str, base_args: &[String], current: impl Fn() -> bool) -> Vec<(u16, u16)> {
+        let operation = self.operation(session_id);
+        let _guard = operation.lock().unwrap();
+        let wanted = self.persisted.lock().unwrap().get(session_id).cloned().unwrap_or_default();
+        let mut restored = Vec::new();
+        for rec in wanted {
+            if !current() { break; }
+            match self.ensure_ready_locked(session_id, host, rec.remote, rec.scheme, false, base_args) {
+                Ok(local) => restored.push((rec.remote, local)),
+                Err(error) => crate::dlog!("tunnel: restore {} for {}: {}", rec.remote, session_id, error),
+            }
+        }
+        restored
+    }
+
     /// FORCE a tunnel that binds the LOCAL side to the SAME port number as the remote (so a remote
     /// localhost:3000 becomes localhost:3000 locally — matches apps that hardcode their port in
     /// redirects). Errors if that local port is already in use (the UI alerts). Replaces any
@@ -349,42 +410,89 @@ impl TunnelRegistry {
     pub fn force_same_port(&self, session_id: &str, host: &str, remote_port: u16, base_args: &[String])
         -> Result<u16, String>
     {
-        // Is the local port free? (bind test — the same check ssh would fail on, surfaced early.)
-        if TcpListener::bind(("127.0.0.1", remote_port)).is_err() {
-            return Err(format!("local port {} is already in use", remote_port));
-        }
-        // Drop any existing tunnel for this remote port so we can rebind to the fixed local port.
-        {
-            let mut map = self.by_session.lock().unwrap();
-            if let Some(per) = map.get_mut(session_id) {
-                if let Some(mut t) = per.remove(&remote_port) { t.kill(); }
-            }
-        }
-        self.spawn_tunnel(session_id, host, remote_port, remote_port, base_args)
+        let operation = self.operation(session_id);
+        let _guard = operation.lock().unwrap();
+        let scheme = self.remembered_scheme(session_id, remote_port);
+        self.ensure_ready_locked(session_id, host, remote_port, scheme, true, base_args)
     }
 
-    /// Spawn `ssh -L 127.0.0.1:<local>:localhost:<remote>` and record it. `host` is
-    /// [user@]host[:sshport]; `base_args` extra ssh opts.
-    fn spawn_tunnel(&self, session_id: &str, host: &str, local_port: u16, remote_port: u16, base_args: &[String])
-        -> Result<u16, String>
-    {
+    fn operation(&self, session_id: &str) -> Arc<Mutex<()>> {
+        self.operations.lock().unwrap().entry(session_id.into()).or_default().clone()
+    }
+
+    fn remembered_scheme(&self, session_id: &str, remote: u16) -> TunnelScheme {
+        self.persisted.lock().unwrap().get(session_id)
+            .and_then(|recs| recs.iter().find(|r| r.remote == remote))
+            .map(|r| r.scheme).unwrap_or_default()
+    }
+
+    fn set_scheme(&self, session_id: &str, remote: u16, scheme: TunnelScheme) {
+        let mut persisted = self.persisted.lock().unwrap();
+        if let Some(rec) = persisted.get_mut(session_id).and_then(|recs| recs.iter_mut().find(|r| r.remote == remote)) {
+            rec.scheme = scheme;
+        }
+        self.save_persisted(&persisted);
+    }
+
+    /// Verify an end-to-end response, repairing a stale child before returning a browser URL.
+    /// All opens, automatic restores and remaps for a session share the same operation lock.
+    pub fn ensure_ready(&self, session_id: &str, host: &str, remote: u16, scheme: TunnelScheme, base_args: &[String]) -> Result<u16, String> {
+        let operation = self.operation(session_id);
+        let _guard = operation.lock().unwrap();
+        self.ensure_ready_locked(session_id, host, remote, scheme, false, base_args)
+    }
+
+    fn ensure_ready_locked(&self, session_id: &str, host: &str, remote: u16, scheme: TunnelScheme, same: bool, base_args: &[String]) -> Result<u16, String> {
+        if remote == 0 { return Err("invalid remote port".into()); }
+        let previous = self.list(session_id).into_iter().find(|(rp, _)| *rp == remote).map(|(_, lp)| lp);
+        if let Some(local) = previous {
+            if (!same || local == remote) && probe_forward(local, remote, scheme) {
+                self.set_scheme(session_id, remote, scheme);
+                return Ok(local);
+            }
+        }
+        if same && previous != Some(remote) && !local_port_free(remote) {
+            return Err(format!("local port {} is already in use", remote));
+        }
+        // A remap can be tested beside the old forward. Only retire it after the replacement
+        // works. Repairing on the same local port necessarily closes the stale child first.
+        if !same || previous == Some(remote) {
+            if let Some(mut old) = self.by_session.lock().unwrap().get_mut(session_id).and_then(|per| per.remove(&remote)) {
+                old.kill();
+            }
+        }
+        let local = if same { remote } else { pick_local_port(self.remembered_local(session_id, remote)).map_err(|e| e.to_string())? };
+        let mut candidate = self.spawn_child(host, local, remote, base_args)?;
+        if let Err(error) = wait_ready(&mut candidate, scheme, Duration::from_secs(10)) {
+            candidate.kill();
+            // Preserve existing mappings, and keep a new failed row so it can be retried.
+            if self.remembered_local(session_id, remote).is_none() { self.remember(session_id, remote, local, 0); }
+            self.set_scheme(session_id, remote, scheme);
+            return Err(error);
+        }
+        self.install(session_id, candidate);
+        self.set_scheme(session_id, remote, scheme);
+        Ok(local)
+    }
+
+    fn spawn_child(&self, host: &str, local_port: u16, remote_port: u16, base_args: &[String]) -> Result<Tunnel, String> {
         let args = tunnel_argv(host, local_port, remote_port, base_args)?;
-
-        let child = Command::new("ssh")
-            .args(&args)
-            .env("PATH", crate::augmented_path())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+        let child = Command::new("ssh").args(&args).env("PATH", crate::augmented_path())
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).spawn()
             .map_err(|e| format!("ssh -L failed to start: {}", e))?;
+        Ok(Tunnel { local_port, remote_port, pid: child.id(), child: Some(child) })
+    }
 
-        let pid = child.id();
-        crate::dlog!("tunnel: session={} local {} -> remote localhost:{} pid={}", session_id, local_port, remote_port, pid);
-        self.by_session.lock().unwrap()
-            .entry(session_id.to_string()).or_default()
-            .insert(remote_port, Tunnel { local_port, remote_port, pid, child: Some(child) });
-        self.remember(session_id, remote_port, local_port, pid);   // persist local+pid so a later run can adopt it
+    fn install(&self, session_id: &str, tunnel: Tunnel) {
+        let (remote, local, pid) = (tunnel.remote_port, tunnel.local_port, tunnel.pid);
+        if let Some(mut old) = self.by_session.lock().unwrap().entry(session_id.into()).or_default().insert(remote, tunnel) { old.kill(); }
+        self.remember(session_id, remote, local, pid);
+    }
+
+    fn spawn_tunnel(&self, session_id: &str, host: &str, local_port: u16, remote_port: u16, base_args: &[String]) -> Result<u16, String> {
+        let child = self.spawn_child(host, local_port, remote_port, base_args)?;
+        self.install(session_id, child);
         Ok(local_port)
     }
 
@@ -409,6 +517,8 @@ impl TunnelRegistry {
     /// explicitly dismissing the row, so it should not reappear on next launch. Returns true if a
     /// live tunnel was killed (also succeeds/forgets for a persisted-but-not-open port).
     pub fn close(&self, session_id: &str, remote_port: u16) -> bool {
+        let operation = self.operation(session_id);
+        let _guard = operation.lock().unwrap();
         let killed = {
             let mut map = self.by_session.lock().unwrap();
             match map.get_mut(session_id).and_then(|per| per.remove(&remote_port)) {
@@ -426,6 +536,12 @@ impl TunnelRegistry {
     /// session survives, so its ports should still show — inactive — on next launch/reconnect).
     /// Clears the persisted pids (the children are dead now).
     pub fn close_session(&self, session_id: &str) {
+        let operation = self.operation(session_id);
+        let _guard = operation.lock().unwrap();
+        self.close_session_locked(session_id);
+    }
+
+    fn close_session_locked(&self, session_id: &str) {
         if let Some(mut per) = self.by_session.lock().unwrap().remove(session_id) {
             for (_, mut t) in per.drain() {
                 t.kill();
@@ -436,19 +552,17 @@ impl TunnelRegistry {
         // Clear the pid only — `local` is deliberately KEPT so a reattach re-opens on the same local
         // port (see pick_local_port), rather than inventing a new one and breaking open browser tabs.
         if let Some(recs) = p.get_mut(session_id) { for r in recs.iter_mut() { r.pid = 0; } }
-        let snapshot = p.clone();
-        drop(p);
-        self.save_persisted(&snapshot);
+        self.save_persisted(&p);
     }
 
     /// Kill a session for good: tear down tunnels AND forget its persisted ports.
     pub fn forget_session(&self, session_id: &str) {
-        self.close_session(session_id);
+        let operation = self.operation(session_id);
+        let _guard = operation.lock().unwrap();
+        self.close_session_locked(session_id);
         let mut p = self.persisted.lock().unwrap();
         p.remove(session_id);
-        let snapshot = p.clone();
-        drop(p);
-        self.save_persisted(&snapshot);
+        self.save_persisted(&p);
     }
 
 }
@@ -456,33 +570,112 @@ impl TunnelRegistry {
 /// Is `pid` still one of OUR ssh -L forward processes? Checks the live process's command line
 /// (via `ps`) so a dead pid — or a pid recycled by an unrelated process — is not mistaken for our
 /// tunnel (used both to adopt live orphans and to decide an adopted tunnel is still alive).
-fn is_our_ssh_pid(pid: u32) -> bool {
+fn is_our_ssh_pid(pid: u32, local: u16, remote: u16) -> bool {
     if pid == 0 { return false; }
     let cmd = Command::new("ps").args(["-o", "command=", "-p", &pid.to_string()])
         .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-    cmd.contains("ssh") && cmd.contains("-L") && cmd.contains("127.0.0.1:") && cmd.contains(":localhost:")
+    let args: Vec<_> = cmd.split_whitespace().collect();
+    let is_ssh = args.first().and_then(|arg| std::path::Path::new(arg).file_name()).is_some_and(|name| name == "ssh");
+    is_ssh && args.windows(2).any(|pair| pair[0] == "-L" && pair[1] == format!("127.0.0.1:{}:localhost:{}", local, remote))
+}
+
+fn wait_ready(tunnel: &mut Tunnel, scheme: TunnelScheme, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !tunnel.alive() { return Err("SSH tunnel exited before it became ready. Check SSH access and local port availability.".into()); }
+        if probe_forward(tunnel.local_port, tunnel.remote_port, scheme) && tunnel.alive() { return Ok(()); }
+        if Instant::now() >= deadline { return Err(format!("Tunnel to remote port {} did not respond. Check that the remote service is running.", tunnel.remote_port)); }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn placeholder(local: u16, remote: u16) -> Tunnel {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        Tunnel { local_port: local, remote_port: remote, pid: child.id(), child: Some(child) }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn same_port_is_idempotent_for_an_existing_healthy_forward() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 256]; let _ = stream.read(&mut request);
+            stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
+        });
+        let reg = TunnelRegistry::new();
+        reg.install("same", placeholder(port, port));
+        assert_eq!(reg.force_same_port("same", "unused", port, &[]).unwrap(), port);
+        reg.forget_session("same");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_replacement_preserves_old_forward_and_persisted_mapping() {
+        let old_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = old_listener.local_addr().unwrap().port();
+        let remote = free_local_port().unwrap();
+        let closed_ssh = free_local_port().unwrap();
+        let reg = TunnelRegistry::new();
+        reg.install("remap", placeholder(local, remote));
+        let before = reg.by_session.lock().unwrap()["remap"][&remote].pid;
+        let error = reg.force_same_port("remap", &format!("127.0.0.1:{closed_ssh}"), remote, &["-F".into(), "/dev/null".into()]).unwrap_err();
+        assert!(error.contains("SSH tunnel exited"), "{error}");
+        assert_eq!(reg.list("remap"), vec![(remote, local)]);
+        assert_eq!(reg.remembered_local("remap", remote), Some(local));
+        assert_eq!(reg.by_session.lock().unwrap()["remap"][&remote].pid, before);
+        reg.forget_session("remap");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn listener_without_a_remote_response_is_not_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let worker = std::thread::spawn(move || {
+            // Like ssh accepting locally while the destination is unreachable.
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(800));
+            drop(stream);
+        });
+        let mut tunnel = placeholder(port, 3000);
+        assert!(wait_ready(&mut tunnel, TunnelScheme::Http, Duration::from_millis(200)).is_err());
+        tunnel.kill();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn cancelled_restore_does_not_spawn_or_forget_persisted_ports() {
+        let reg = TunnelRegistry::new();
+        reg.remember("closed", 3000, 45000, 0);
+        assert!(reg.restore_ready_if("closed", "unused", &[], || false).is_empty());
+        assert!(reg.list("closed").is_empty());
+        assert_eq!(reg.remembered_local("closed", 3000), Some(45000));
+    }
+
     fn lh() -> Vec<String> { vec!["localhost".into(), "127.0.0.1".into()] }
 
     #[test]
     fn classify_bare_host_port() {
         assert_eq!(classify_loopback("localhost:3000", &lh()),
-            Some(("localhost".into(), LoopbackUrl { port: 3000, path: "/".into() })));
+            Some(("localhost".into(), LoopbackUrl { scheme: TunnelScheme::Http, port: 3000, path: "/".into() })));
         assert_eq!(classify_loopback("127.0.0.1:8080", &lh()),
-            Some(("127.0.0.1".into(), LoopbackUrl { port: 8080, path: "/".into() })));
+            Some(("127.0.0.1".into(), LoopbackUrl { scheme: TunnelScheme::Http, port: 8080, path: "/".into() })));
     }
 
     #[test]
     fn classify_with_scheme_and_path() {
         assert_eq!(classify_loopback("http://localhost:5173/app?x=1", &lh()),
-            Some(("localhost".into(), LoopbackUrl { port: 5173, path: "/app?x=1".into() })));
+            Some(("localhost".into(), LoopbackUrl { scheme: TunnelScheme::Http, port: 5173, path: "/app?x=1".into() })));
         assert_eq!(classify_loopback("https://127.0.0.1:443/", &lh()),
-            Some(("127.0.0.1".into(), LoopbackUrl { port: 443, path: "/".into() })));
+            Some(("127.0.0.1".into(), LoopbackUrl { scheme: TunnelScheme::Https, port: 443, path: "/".into() })));
     }
 
     #[test]
@@ -590,7 +783,7 @@ mod tests {
         assert_eq!(st.len(), 1);
         assert_eq!(st[0].remote, 3000);
         assert!(st[0].local.is_none() && !st[0].active, "non-ssh pid not adopted -> inactive");
-        assert!(!is_our_ssh_pid(1), "pid 1 is not our ssh -L");
+        assert!(!is_our_ssh_pid(1, 40000, 3000), "pid 1 is not our ssh -L");
 
         let _ = std::fs::remove_file(&path);
     }

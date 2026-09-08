@@ -22,6 +22,7 @@ interface CreateResult {
 }
 
 interface TestBackend {
+  delay?: Record<string, number>;
   reject?: Record<string, string>;
   createSessionResult?: CreateResult;
   tunnels?: Record<string, unknown[]>;
@@ -156,6 +157,9 @@ interface Window {
   async function invoke(command: string, args: CommandArgs = {}): Promise<unknown> {
     calls.invocations.push([command, clone(args)]);
     const backend = fixture.backend ?? {};
+    const tunnelSnapshot = command === 'list_tunnels' ? clone(backend.tunnels?.[args.id ?? ''] ?? []) : [];
+    const delay = backend.delay?.[command];
+    if (delay) await new Promise(resolve => window.setTimeout(resolve, delay));
     const rejection = backend.reject?.[command];
     if (rejection) throw new Error(rejection);
     switch (command) {
@@ -231,7 +235,7 @@ interface Window {
       case 'set_tab_prefs':
         calls.tabPrefs.push([args.id, args.tabOrder ? args.tabOrder.slice() : null, clone(args.tabColor)]);
         return null;
-      case 'list_tunnels': return clone(backend.tunnels?.[args.id ?? ''] ?? []);
+      case 'list_tunnels': return tunnelSnapshot;
       case 'list_hosts': return clone(backend.hosts ?? []);
       case 'read_remote_file':
       case 'save_file':

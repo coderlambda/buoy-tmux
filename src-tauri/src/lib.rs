@@ -98,7 +98,6 @@ impl Backend {
     fn rename_window(&self, win: &str, title: &str) { if let Backend::Supervised(s) = self { s.rename_window(win, title); } }
     fn capture_window(&self, win: &str) { if let Backend::Supervised(s) = self { s.capture_window(win); } }
     fn retry(&self) { if let Backend::Supervised(s) = self { s.retry(); } }
-    fn force_reconnect(&self) { if let Backend::Supervised(s) = self { s.force_reconnect(); } }
 }
 
 struct Session {
@@ -107,6 +106,7 @@ struct Session {
 }
 
 struct AppState {
+    lifecycle: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     sessions: Mutex<HashMap<String, Session>>,
     store: SessionStore,
     tunnels: tunnel::TunnelRegistry,
@@ -115,6 +115,12 @@ struct AppState {
     /// Documents the user opted into running scripts for (§16 HTML preview), served over the
     /// `buoyhtml:` scheme. Empty until an explicit "Enable scripts" click.
     previews: html_preview::PreviewStore,
+}
+
+impl AppState {
+    fn lifecycle_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        self.lifecycle.lock().unwrap().entry(id.into()).or_default().clone()
+    }
 }
 
 // Small app config loaded from config.json in the app data dir (§18). No settings UI yet.
@@ -322,7 +328,16 @@ struct CreateArgs {
 }
 
 #[tauri::command]
-fn create_session(app: AppHandle, state: State<AppState>, meta: CreateArgs) -> Result<serde_json::Value, String> {
+async fn create_session(app: AppHandle, meta: CreateArgs) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let operation = state.lifecycle_lock(meta.id.as_deref().unwrap_or("new"));
+        let _guard = operation.lock().unwrap();
+        create_session_inner(app.clone(), app.state::<AppState>(), meta)
+    }).await.map_err(|error| error.to_string())?
+}
+
+fn create_session_inner(app: AppHandle, state: State<AppState>, meta: CreateArgs) -> Result<serde_json::Value, String> {
     dlog!("create_session: host={:?} session={:?} mode={:?} tmuxPath={:?} tmuxVersion={:?} socketName={:?}",
         meta.host, meta.session, meta.mode, meta.tmux_path, meta.tmux_version, meta.socket_name);
     let id = meta.id.clone().unwrap_or_else(|| {
@@ -449,29 +464,29 @@ fn create_session(app: AppHandle, state: State<AppState>, meta: CreateArgs) -> R
     let persist = !no_local_tmux;
     let mut persisted_meta = session_meta.clone();
     if persist {
-        let mut list = state.store.load();
-        let mut m = session_meta.clone();
-        if let Some(existing) = list.iter().find(|s| s.id == id) {
-            m.order = existing.order;
-            m.color = existing.color.clone();
-            m.last_tab = existing.last_tab.clone();
-            m.tab_order = existing.tab_order.clone();
-            m.tab_colors = existing.tab_colors.clone();
-            m.recovery_tabs = existing.recovery_tabs.clone();
-            m.restore_pending = existing.restore_pending;
-            m.socket_name = existing.socket_name.clone().or(m.socket_name);
-            m.recovery_windows = existing.recovery_windows.clone();
-            if m.title.is_none() { m.title = existing.title.clone(); }
-        } else {
-            m.order = list.iter().map(|s| s.order).max().map_or(0, |mx| mx + 1);
-        }
-        list.retain(|s| s.id != id);
-        list.push(m);
-        list.sort_by_key(|s| s.order);
-        state.store.save(&list);
-        if let Some(saved) = list.iter().find(|saved| saved.id == id) {
-            persisted_meta = saved.clone();
-        }
+        state.store.update(|list| {
+            let mut m = session_meta.clone();
+            if let Some(existing) = list.iter().find(|s| s.id == id) {
+                m.order = existing.order;
+                m.color = existing.color.clone();
+                m.last_tab = existing.last_tab.clone();
+                m.tab_order = existing.tab_order.clone();
+                m.tab_colors = existing.tab_colors.clone();
+                m.recovery_tabs = existing.recovery_tabs.clone();
+                m.restore_pending = existing.restore_pending;
+                m.socket_name = existing.socket_name.clone().or(m.socket_name);
+                m.recovery_windows = existing.recovery_windows.clone();
+                if m.title.is_none() { m.title = existing.title.clone(); }
+            } else {
+                m.order = list.iter().map(|s| s.order).max().map_or(0, |mx| mx + 1);
+            }
+            list.retain(|s| s.id != id);
+            list.push(m);
+            list.sort_by_key(|s| s.order);
+            if let Some(saved) = list.iter().find(|saved| saved.id == id) {
+                persisted_meta = saved.clone();
+            }
+        });
     }
 
     // A closed session no longer exists remotely. Reconstruct its windows before the normal
@@ -563,7 +578,11 @@ fn create_session(app: AppHandle, state: State<AppState>, meta: CreateArgs) -> R
                     // try_state, not state(): this thread is detached and can outlive app teardown,
                     // where state() would panic (same reason the buoyhtml handler uses try_state).
                     let state = match app2.try_state::<AppState>() { Some(s) => s, None => return };
-                    let restored = state.tunnels.reestablish(&id2, &host2, &[]);
+                    let restored = state.tunnels.restore_ready_if(&id2, &host2, &[], || {
+                        let sessions = state.sessions.lock().unwrap();
+                        matches!(sessions.get(&id2), Some(Session { backend: Backend::Supervised(sup), meta })
+                            if meta.host == host2 && sup.state() == supervisor::State::Connected)
+                    });
                     dlog!("reconnect: restored {} tunnel(s) for {}: {:?}", restored.len(), id2, restored);
                     // Repaint the sidebar rows (grey -> live) without waiting for the 5s probe tick.
                     emit_tunnels(&app2, &state, &id2);
@@ -660,7 +679,16 @@ struct RecoveryTabHint {
 }
 
 #[tauri::command]
-fn session_detach(state: State<AppState>, id: String) -> Result<(), String> {
+async fn session_detach(app: AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let operation = state.lifecycle_lock(&id);
+        let _guard = operation.lock().unwrap();
+        session_detach_inner(app.state::<AppState>(), id)
+    }).await.map_err(|error| error.to_string())?
+}
+
+fn session_detach_inner(state: State<AppState>, id: String) -> Result<(), String> {
     if !state.store.update_session(&id, |saved| saved.detached = true) {
         return Err("unknown session".into());
     }
@@ -670,7 +698,16 @@ fn session_detach(state: State<AppState>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn session_close(state: State<AppState>, id: String, tabs: Vec<RecoveryTabHint>) -> Result<(), String> {
+async fn session_close(app: AppHandle, id: String, tabs: Vec<RecoveryTabHint>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let operation = state.lifecycle_lock(&id);
+        let _guard = operation.lock().unwrap();
+        session_close_inner(app.state::<AppState>(), id, tabs)
+    }).await.map_err(|error| error.to_string())?
+}
+
+fn session_close_inner(state: State<AppState>, id: String, tabs: Vec<RecoveryTabHint>) -> Result<(), String> {
     // Close is intentionally destructive to the remote tmux server. Snapshot first; unlike Detach,
     // only a successfully captured and killed session is moved to History.
     let meta = state.store.load().into_iter().find(|saved| saved.id == id)
@@ -729,7 +766,17 @@ fn check_open_sessions(state: State<AppState>) -> Vec<SessionCheckResult> {
 }
 
 #[tauri::command]
-fn session_kill(state: State<AppState>, id: String) -> serde_json::Value {
+async fn session_kill(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let operation = state.lifecycle_lock(&id);
+        let _guard = operation.lock().unwrap();
+        session_kill_inner(app.state::<AppState>(), id)
+    })
+        .await.map_err(|error| error.to_string())
+}
+
+fn session_kill_inner(state: State<AppState>, id: String) -> serde_json::Value {
     // Kill: terminate the remote tmux session and remove it.
     let meta = {
         let mut sessions = state.sessions.lock().unwrap();
@@ -759,9 +806,7 @@ fn session_kill(state: State<AppState>, id: String) -> serde_json::Value {
             }
         }
     }
-    let mut list = state.store.load();
-    list.retain(|s| s.id != id);
-    state.store.save(&list);
+    state.store.update(|list| list.retain(|s| s.id != id));
     json!({ "ok": true, "killedRemote": killed_remote })
 }
 
@@ -772,11 +817,7 @@ fn session_rename(state: State<AppState>, id: String, title: String) -> serde_js
     if let Some(s) = state.sessions.lock().unwrap().get_mut(&id) {
         s.meta.title = Some(clean.clone());
     }
-    let mut list = state.store.load();
-    if let Some(e) = list.iter_mut().find(|s| s.id == id) {
-        e.title = Some(clean.clone());
-        state.store.save(&list);
-    }
+    state.store.update_session(&id, |session| session.title = Some(clean.clone()));
     json!({ "ok": true, "title": clean })
 }
 
@@ -784,24 +825,17 @@ fn session_rename(state: State<AppState>, id: String, title: String) -> serde_js
 // to match; unknown ids are ignored, missing ones keep their relative order at the end.
 #[tauri::command]
 fn reorder_sessions(state: State<AppState>, ids: Vec<String>) {
-    let mut list = state.store.load();
     let rank: std::collections::HashMap<&String, usize> =
         ids.iter().enumerate().map(|(i, id)| (id, i)).collect();
     // stable sort: known ids by their new rank, unknown ids after (keeping prior order).
-    list.sort_by_key(|s| rank.get(&s.id).copied().unwrap_or(usize::MAX));
-    // save() reassigns .order by index, so the array position IS the persisted order.
-    state.store.save(&list);
+    state.store.update(|list| list.sort_by_key(|s| rank.get(&s.id).copied().unwrap_or(usize::MAX)));
 }
 
 // §20: set (or clear, when color is empty) a project's accent color.
 #[tauri::command]
 fn set_session_color(state: State<AppState>, id: String, color: Option<String>) {
     let clean = sanitize_color(color.as_deref());
-    let mut list = state.store.load();
-    if let Some(e) = list.iter_mut().find(|s| s.id == id) {
-        e.color = clean;
-        state.store.save(&list);
-    }
+    state.store.update_session(&id, |session| session.color = clean);
 }
 
 // §20: remember which project was last active (restored + focused on next app open).
@@ -815,19 +849,14 @@ fn set_last_active(state: State<AppState>, id: String) {
 // §20: remember a project's last-active tab (tmux window id), restored when it's reopened.
 #[tauri::command]
 fn set_last_tab(state: State<AppState>, id: String, win: String) {
-    let mut list = state.store.load();
-    if let Some(e) = list.iter_mut().find(|s| s.id == id) {
-        e.last_tab = Some(win);
-        state.store.save(&list);
-    }
+    state.store.update_session(&id, |session| session.last_tab = Some(win));
 }
 
 // §20: persist a project's tab order and/or a single tab's color.
 #[tauri::command]
 fn set_tab_prefs(state: State<AppState>, id: String, tab_order: Option<Vec<String>>,
                  tab_color: Option<(String, Option<String>)>) {
-    let mut list = state.store.load();
-    if let Some(e) = list.iter_mut().find(|s| s.id == id) {
+    state.store.update_session(&id, |e| {
         if let Some(order) = tab_order { e.tab_order = order; }
         if let Some((win, color)) = tab_color {
             match sanitize_color(color.as_deref()) {
@@ -835,8 +864,7 @@ fn set_tab_prefs(state: State<AppState>, id: String, tab_order: Option<Vec<Strin
                 None => { e.tab_colors.remove(&win); }
             }
         }
-        state.store.save(&list);
-    }
+    });
 }
 
 // Project tab ops (control mode only; no-op on plain).
@@ -870,8 +898,22 @@ fn session_retry(state: State<AppState>, id: String) {
 // User-initiated FORCE reconnect from any state (renderer 'forceReconnect') — reattach now even if
 // the session currently looks connected (e.g. a wedged/half-open link after a network change).
 #[tauri::command]
-fn session_force_reconnect(state: State<AppState>, id: String) {
-    if let Some(s) = state.sessions.lock().unwrap().get(&id) { s.backend.force_reconnect(); }
+async fn session_force_reconnect(app: AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let operation = state.lifecycle_lock(&id);
+        let _guard = operation.lock().unwrap();
+        let supervisor = {
+            let sessions = state.sessions.lock().unwrap();
+            match sessions.get(&id).map(|session| &session.backend) {
+                Some(Backend::Supervised(supervisor)) => supervisor.clone(),
+                _ => return Err("Workspace has no reconnectable session.".to_string()),
+            }
+        };
+        // spawn() can perform SSH work and report state; hold neither the UI thread nor sessions.
+        supervisor.force_reconnect();
+        Ok(())
+    }).await.map_err(|error| error.to_string())?
 }
 
 // Largest file we'll transport for the viewer's Download-to-local path (DESIGN.md §16). Render
@@ -1049,30 +1091,36 @@ fn remember_host(state: State<AppState>, host: String) {
 // in the browser (§18). Reuses a live tunnel for the same (session, remote port). If the URL isn't
 // a configured loopback URL, this is a no-op error (the renderer opens plain URLs directly).
 #[tauri::command]
-fn open_forwarded_url(app: AppHandle, state: State<AppState>, id: String, url: String)
-    -> Result<serde_json::Value, String>
-{
-    let loopback_hosts = state.config.lock().unwrap().loopback_hosts.clone();
-    let (_, lb) = tunnel::classify_loopback(&url, &loopback_hosts)
-        .ok_or_else(|| "not a loopback URL".to_string())?;
-    // Connection params from the VALIDATED store (never the renderer).
-    let meta = {
-        let sessions = state.sessions.lock().unwrap();
-        sessions.get(&id).map(|s| s.meta.clone())
-    }.or_else(|| state.store.load().into_iter().find(|s| s.id == id))
-     .ok_or_else(|| "unknown session".to_string())?;
-    if meta.host.is_empty() {
-        return Err("local session has no remote to forward".into());
-    }
-    let local_port = state.tunnels.ensure(&id, &meta.host, lb.port, &[])?;
-    let local_url = format!("http://localhost:{}{}", local_port, lb.path);
-    dlog!("open_forwarded_url: {} -> {}", url, local_url);
-    emit_tunnels(&app, &state, &id);   // refresh the sidebar's port list
-    // Give ssh a beat to establish the forward before the browser hits it.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    use tauri_plugin_opener::OpenerExt;
-    let _ = app.opener().open_url(&local_url, None::<&str>);
-    Ok(json!({ "ok": true, "localUrl": local_url }))
+async fn open_forwarded_url(app: AppHandle, id: String, url: String) -> Result<serde_json::Value, String> {
+    // Network probes and SSH startup must never block the platform UI thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let hosts = state.config.lock().unwrap().loopback_hosts.clone();
+        let (_, lb) = tunnel::classify_loopback(&url, &hosts).ok_or("not a loopback URL")?;
+        let meta = tunnel_session(&state, &id)?;
+        let result = state.tunnels.ensure_ready(&id, &meta.host, lb.port, lb.scheme, &[]);
+        let local_port = match result {
+            Ok(local) => local,
+            Err(error) => { emit_tunnels(&app, &state, &id); return Err(error); }
+        };
+        // A detach/close while readiness was pending cancels browser navigation.
+        tunnel_session(&state, &id)?;
+        let local_url = format!("{}://localhost:{}{}", lb.scheme.as_str(), local_port, lb.path);
+        use tauri_plugin_opener::OpenerExt;
+        let opened = app.opener().open_url(&local_url, None::<&str>);
+        emit_tunnels(&app, &state, &id);
+        opened.map_err(|error| format!("Could not open browser: {error}"))?;
+        Ok(json!({ "ok": true, "localUrl": local_url }))
+    }).await.map_err(|error| error.to_string())?
+}
+
+fn tunnel_session(state: &AppState, id: &str) -> Result<SessionMeta, String> {
+    if !state.sessions.lock().unwrap().contains_key(id) { return Err("Workspace connection was cancelled.".into()); }
+    let meta = state.store.load().into_iter().find(|s| s.id == id)
+        .ok_or_else(|| "unknown session".to_string())?;
+    if meta.archived || meta.detached { return Err("Workspace was closed or detached.".into()); }
+    if meta.host.is_empty() { return Err("local session has no remote to forward".into()); }
+    Ok(meta)
 }
 
 // A session's forwarded ports as [{ remote, local, active }] — persisted + live, each probed
@@ -1080,7 +1128,7 @@ fn open_forwarded_url(app: AppHandle, state: State<AppState>, id: String, url: S
 // show them greyed after a restart and let the user re-open or close them.
 fn tunnels_json(state: &AppState, id: &str) -> serde_json::Value {
     let list: Vec<serde_json::Value> = state.tunnels.status(id).into_iter()
-        .map(|s| json!({ "remote": s.remote, "local": s.local, "active": s.active }))
+        .map(|s| json!({ "remote": s.remote, "local": s.local, "active": s.active, "scheme": s.scheme }))
         .collect();
     json!(list)
 }
@@ -1090,30 +1138,29 @@ fn emit_tunnels(app: &AppHandle, state: &AppState, id: &str) {
 
 // List a session's live tunnels (renderer pulls this on demand, e.g. after mount/reconnect).
 #[tauri::command]
-fn list_tunnels(state: State<AppState>, id: String) -> serde_json::Value {
-    tunnels_json(&state, &id)
+async fn list_tunnels(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || tunnels_json(&app.state::<AppState>(), &id))
+        .await.map_err(|error| error.to_string())
 }
 
-// Close ONE tunnel (by remote port) for a session; re-emit the updated list.
 #[tauri::command]
-fn close_tunnel(app: AppHandle, state: State<AppState>, id: String, remote: u16) {
-    state.tunnels.close(&id, remote);
-    emit_tunnels(&app, &state, &id);
+async fn close_tunnel(app: AppHandle, id: String, remote: u16) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.tunnels.close(&id, remote);
+        emit_tunnels(&app, &state, &id);
+    }).await.map_err(|error| error.to_string())
 }
 
-// Force-forward a remote port onto the SAME local port (localhost:<remote> -> localhost:<remote>).
-// Errors (e.g. "local port N is already in use") propagate so the renderer can alert.
 #[tauri::command]
-fn force_forward(app: AppHandle, state: State<AppState>, id: String, remote: u16) -> Result<serde_json::Value, String> {
-    let meta = {
-        let sessions = state.sessions.lock().unwrap();
-        sessions.get(&id).map(|s| s.meta.clone())
-    }.or_else(|| state.store.load().into_iter().find(|s| s.id == id))
-     .ok_or_else(|| "unknown session".to_string())?;
-    if meta.host.is_empty() { return Err("local session has no remote to forward".into()); }
-    let local = state.tunnels.force_same_port(&id, &meta.host, remote, &[])?;
-    emit_tunnels(&app, &state, &id);
-    Ok(json!({ "ok": true, "local": local }))
+async fn force_forward(app: AppHandle, id: String, remote: u16) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let meta = tunnel_session(&state, &id)?;
+        let result = state.tunnels.force_same_port(&id, &meta.host, remote, &[]);
+        emit_tunnels(&app, &state, &id);
+        result.map(|local| json!({ "ok": true, "local": local }))
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1152,6 +1199,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
+            lifecycle: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()), store,
             tunnels: tunnel::TunnelRegistry::with_store(user_data_dir().join("tunnels.json")),
             hosts: host_history::HostHistory::load(user_data_dir().join("hosts.json")),

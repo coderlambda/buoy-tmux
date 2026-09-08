@@ -37,9 +37,7 @@ impl HostHistory {
         h.retain(|x| x != host);      // move-to-front: drop any existing copy
         h.insert(0, host.to_string());
         h.truncate(CAP);
-        let snapshot = h.clone();
-        drop(h);
-        self.save(&snapshot);
+        self.save(&h);
     }
 
     fn save(&self, hosts: &[String]) {
