@@ -2,11 +2,10 @@
 :root { color-scheme:dark; --bg:#1e1e2e; --panel:#181825; --surface:#232335; --fg:#cdd6f4;
   --muted:#a6adc8; --accent:#89b4fa; --accent-fg:#111c35; --tint:#2b3854; --line:#383a50;
   --hover:#313244; --success:#a6e3a1; --warning:#f9e2af; --danger:#f38ba8; }
-@media (prefers-color-scheme:light) {
-  :root { color-scheme:light; --bg:#eff1f5; --panel:#e6e9ef; --surface:#fff; --fg:#4c4f69;
-    --muted:#626780; --accent:#1e66f5; --accent-fg:#fff; --tint:#dce7fd; --line:#ccd0da;
-    --hover:#dce0e8; --success:#2a7533; --warning:#8a5d15; --danger:#b52b44; }
-}
+:root[data-theme=light] { color-scheme:light; --bg:#eff1f5; --panel:#e6e9ef; --surface:#fff; --fg:#4c4f69;
+  --muted:#626780; --accent:#1e66f5; --accent-fg:#fff; --tint:#dce7fd; --line:#ccd0da;
+  --hover:#dce0e8; --success:#2a7533; --warning:#8a5d15; --danger:#b52b44; }
+
 [hidden] { display:none!important; }
 body { font-size:12px; }
 button { font:inherit; color:inherit; cursor:pointer; }
@@ -140,6 +139,8 @@ dialog .discovered-session.selected { background:var(--tint); }
 .action-grid { display:flex; gap:5px; flex-wrap:wrap; }
 .palette-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:12px; }
 .palette-row .color-swatch { width:19px; height:19px; margin:0; padding:0; }
+.action-dialog.theme-dialog { width:176px; }
+.action-grid .icon-button[aria-pressed=true] { background:var(--tint); border-color:var(--accent); }
 .action-grid .icon-button { width:34px; height:32px; border:1px solid var(--line); background:var(--bg); }
 .dialog-details { margin:0; }
 .dialog-details>div { display:flex; gap:12px; justify-content:space-between; padding:7px 0; border-bottom:1px solid var(--line); font-size:11px; }

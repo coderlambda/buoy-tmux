@@ -21,6 +21,7 @@ function on<T>(event: string, cb: (payload: T) => void): void {
 }
 
 export const terminalAPI: TerminalAPI = {
+  setTheme: (theme) => invoke('set_theme', { theme }),
   // session CRUD — the Rust side owns all argv/validation.
   listSessions: () => invoke('list_sessions'),
   discoverTmuxSessions: (kind, host) => invoke('discover_tmux_sessions', { kind, host }),

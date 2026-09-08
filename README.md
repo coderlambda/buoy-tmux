@@ -128,6 +128,8 @@ sidebar.
 - Remote clipboard copy support plus normal selection shortcuts and context-menu copy.
 - Correct input and terminal replies even when switching quickly between tmux windows.
 - Session and tab colors, inline rename, persistent ordering, and a focused connection-status UI.
+- Dark blue by default. Click the appearance icon in the sidebar footer to choose Dark, Light, or
+  System; Buoy remembers the choice and updates the window and terminals together.
 
 ## Getting started
 

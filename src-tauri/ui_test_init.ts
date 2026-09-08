@@ -43,6 +43,7 @@ interface TestFixture {
 }
 
 interface CommandArgs {
+  theme?: 'dark' | 'light' | null;
   remote?: number;
   meta?: CreateResult;
   id?: string;
@@ -163,6 +164,8 @@ interface Window {
     const rejection = backend.reject?.[command];
     if (rejection) throw new Error(rejection);
     switch (command) {
+      // Appearance has no session side effects: exercise the real native titlebar in UI tests.
+      case 'set_theme': return window.__TAURI__!.core.invoke(command, args);
       case 'list_sessions': return clone(fixture.sessions);
       case 'discover_tmux_sessions': return clone(backend.discovery ?? {
         tmuxPath: '/usr/bin/tmux', tmuxVersion: [3, 6], sessions: [],
