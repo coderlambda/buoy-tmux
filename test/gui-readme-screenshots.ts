@@ -99,6 +99,7 @@ describe('README product screenshots', () => {
     });
     await js(`document.getElementById('new').click()`);
     await js(`document.getElementById('f-host').value = 'dev@example.com'`);
+    await js(`document.getElementById('f-import-mode').click()`);
     await js(`document.getElementById('f-discover').click()`);
     await browser.waitUntil(async () => js(
       `document.querySelectorAll('#tmux-discovery .discovered-session').length === 2`,
@@ -148,6 +149,7 @@ describe('README product screenshots', () => {
       data: '\u001b[2J\u001b[HWorkspace is still running in tmux.\r\n\r\n$ ',
     });
     await browser.pause(200);
+    await js(`document.getElementById('show-history').click()`);
     await screenshotIfRequested('session-history.png', SCREENSHOT_ENV);
   });
 });

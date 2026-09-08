@@ -32,6 +32,7 @@ interface XtermLinkProvider {
 }
 
 interface XtermTerminal {
+  options?: XtermTerminalOptions;
   readonly cols: number;
   readonly rows: number;
   readonly buffer: { active: XtermBuffer };
@@ -57,7 +58,7 @@ interface XtermTerminal {
 interface XtermTerminalOptions {
   fontFamily?: string;
   fontSize?: number;
-  theme?: { background?: string; foreground?: string };
+  theme?: { background?: string; foreground?: string; cursor?: string; cursorAccent?: string; green?: string };
   scrollback?: number;
   linkHandler?: unknown;
 }

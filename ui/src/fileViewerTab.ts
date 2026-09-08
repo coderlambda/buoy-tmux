@@ -1,3 +1,4 @@
+import { iconButton, setIcon, confirmAction } from './uiControls.js';
 
 // 'fileviewer' tab kind (DESIGN.md §16): renders a fetched remote/local file in-app as text,
 // markdown, or image, with a Download-to-local button. It is APP-LOCAL — no tmux window — so the
@@ -160,6 +161,7 @@ export function renderMarkdown(md: string): string {
 }
 
 export interface FileViewerApi {
+  copyText?(text: string): unknown;
   readRemoteFile(id: string, path: string): Promise<RemoteFileResult>;
   saveFile?(dataB64: string, suggestedName: string): Promise<{ ok?: boolean }>;
   enableHtmlScripts?(dataB64: string): Promise<{ url?: string }>;
@@ -198,19 +200,20 @@ export function createFileViewerTab(spec: FileViewerTabSpec, ctx: FileViewerTabC
   function toolbar(size: number, note: string, mode: FileClassification['mode']): HTMLDivElement {
     const bar = h('div', { class: 'fv-bar' });
     bar.appendChild(h('span', { class: 'fv-name' }, baseName(path)));
-    const meta = h('span', { class: 'fv-meta' }, fmtSize(size) + (note ? ' · ' + note : ''));
+    const meta = h('span', { class: 'fv-meta', title: path + (note ? ' · ' + note : '') }, fmtSize(size));
     bar.appendChild(meta);
+    if (api.copyText) bar.appendChild(iconButton('copy', 'Copy file path', () => api.copyText?.(path)));
     // "Enable scripts" — opt THIS document into a scripted preview. Only offered for html, and only
     // while still static: running a remote file's JS is a per-file decision, so there is no
     // remembered preference and no auto-enable. See the fv-html branch for the isolation.
     const enableHtmlScripts = api.enableHtmlScripts;
     if (mode === 'html' && !scripted && enableHtmlScripts) {
-      const en = h('button', { class: 'fv-scripts', title:
-        'Run this file\'s scripts in an isolated frame (it will be able to load code from the network)' },
-        'Enable scripts');
+      const en = iconButton('code', 'Enable scripts for this preview');
+      en.classList.add('fv-scripts');
       en.onclick = async () => {
         if (!fetched) return;
-        en.disabled = true; en.textContent = 'Enabling…';
+        if (!await confirmAction('Enable scripts', 'This file can run scripts and load code from the network in an isolated preview. Enable only for this file?', 'Enable scripts')) return;
+        en.disabled = true; setIcon(en, 'loading', 'Enabling scripts…');
         try {
           const res = await enableHtmlScripts(fetched.data_b64);
           if (!res || !res.url) throw new Error('no preview url');
@@ -220,21 +223,22 @@ export function createFileViewerTab(spec: FileViewerTabSpec, ctx: FileViewerTabC
           if (el) renderInto(el);   // re-render into the scripted frame
         } catch (e) {
           ctx.setStatus('enable scripts failed: ' + errorMessage(e));
-          en.disabled = false; en.textContent = 'Enable scripts';
+          en.disabled = false; setIcon(en, 'code', 'Enable scripts for this preview');
         }
       };
       bar.appendChild(en);
     }
     const saveFile = api.saveFile;
-    const dl = h('button', { class: 'fv-dl' }, 'Download to local');
+    const dl = iconButton('download', 'Download to local');
+    dl.classList.add('fv-dl');
     dl.onclick = async () => {
       if (!fetched || !saveFile) return;
-      dl.disabled = true; dl.textContent = 'Saving…';
+      dl.disabled = true; setIcon(dl, 'loading', 'Saving…');
       try {
         const res = await saveFile(fetched.data_b64, baseName(path));
         ctx.setStatus(res && res.ok ? `saved ${baseName(path)}` : 'save canceled');
       } catch (e) { ctx.setStatus('save failed: ' + errorMessage(e)); }
-      dl.disabled = false; dl.textContent = 'Download to local';
+      dl.disabled = false; setIcon(dl, 'download', 'Download to local');
     };
     bar.appendChild(dl);
     return bar;

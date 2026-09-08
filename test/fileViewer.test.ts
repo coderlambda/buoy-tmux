@@ -32,6 +32,11 @@ interface FakeNode {
   textContent: string;
   _innerHTML: string;
   innerHTML: string;
+  outerHTML: string;
+  dataset: Record<string, string>;
+  classList: { add(...names: string[]): void };
+  parentNode?: FakeNode;
+  returnValue: string;
   disabled?: boolean;
   onclick?: (() => unknown) | null;
   src?: string;
@@ -39,6 +44,12 @@ interface FakeNode {
   setAttribute(key: string, value: unknown): void;
   getAttribute(key: string): string | null;
   appendChild(child: FakeNode): FakeNode;
+  append(...children: FakeNode[]): void;
+  remove(): void;
+  focus(): void;
+  showModal(): void;
+  close(value?: string): void;
+  addEventListener(name: string, callback: () => void): void;
   querySelectorAll(): FakeNode[];
   find(tag: string): FakeNode | null;
   findClass(className: string): FakeNode | null;
@@ -46,9 +57,13 @@ interface FakeNode {
 
 async function withFakeDom<T>(fn: (makeNode: (tag: string) => FakeNode) => Promise<T>): Promise<T> {
   const mk = (tag: string): FakeNode => {
+    const listeners: Record<string, Array<() => void>> = {};
     const node: FakeNode = {
       tagName: String(tag).toLowerCase(), children: [], attrs: {}, style: { cssText: '' },
       className: '', textContent: '', _innerHTML: '',
+      dataset: {}, returnValue: '',
+      classList: { add(...names) { node.className += ' ' + names.join(' '); } },
+      get outerHTML() { return `<${this.tagName}></${this.tagName}>`; },
       // Real DOM: assigning innerHTML replaces the subtree. renderInto() uses `= ''` to reset the
       // container before re-rendering, so the stub must actually drop children or a re-render would
       // still find the previous iframe.
@@ -56,7 +71,12 @@ async function withFakeDom<T>(fn: (makeNode: (tag: string) => FakeNode) => Promi
       set innerHTML(v) { this._innerHTML = String(v); if (String(v) === '') this.children = []; },
       setAttribute(k: string, v: unknown) { this.attrs[k] = String(v); },
       getAttribute(k: string) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] ?? null : null; },
-      appendChild(c: FakeNode) { this.children.push(c); return c; },
+      appendChild(c: FakeNode) { c.parentNode = this; this.children.push(c); return c; },
+      append(...children) { children.forEach(child => this.appendChild(child)); },
+      remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(c => c !== this); },
+      focus() {}, showModal() {},
+      close(value = '') { this.returnValue = value; (listeners.close || []).forEach(fn => fn()); },
+      addEventListener(name, callback) { (listeners[name] ||= []).push(callback); },
       querySelectorAll() { return []; },
       // depth-first search by tag, so a test can find the iframe wherever it's nested
       find(t: string): FakeNode | null {
@@ -66,7 +86,7 @@ async function withFakeDom<T>(fn: (makeNode: (tag: string) => FakeNode) => Promi
       },
       // depth-first search by className (buttons are nested inside the toolbar)
       findClass(cls: string): FakeNode | null {
-        if (this.className === cls) return this;
+        if (this.className.split(' ').includes(cls)) return this;
         for (const c of this.children) { const hit = c.findClass && c.findClass(cls); if (hit) return hit; }
         return null;
       },
@@ -75,14 +95,10 @@ async function withFakeDom<T>(fn: (makeNode: (tag: string) => FakeNode) => Promi
   };
   const prevDoc = globalThis.document, prevAtob = globalThis.atob;
   const fakeDocument = {
+    body: mk('body'),
     createElement: mk,
-    createTextNode: (text: string): FakeNode => ({
-      tagName: '#text', textContent: text, children: [], attrs: {}, style: { cssText: '' },
-      className: '', _innerHTML: '',
-      get innerHTML() { return this._innerHTML; }, set innerHTML(value: string) { this._innerHTML = value; },
-      setAttribute() {}, getAttribute() { return null; }, appendChild(child: FakeNode) { return child; },
-      querySelectorAll() { return []; }, find: () => null, findClass: () => null,
-    }),
+    createElementNS: (_namespace: string, tag: string) => mk(tag),
+    createTextNode: (text: string): FakeNode => { const n = mk('#text'); n.textContent = text; return n; },
   };
   globalThis.document = fakeDocument as unknown as Document;
   if (typeof global.atob !== 'function') {
@@ -90,6 +106,27 @@ async function withFakeDom<T>(fn: (makeNode: (tag: string) => FakeNode) => Promi
   }
   try { return await fn(mk); } finally { globalThis.document = prevDoc; globalThis.atob = prevAtob; }
 }
+
+async function acceptScripts(button: FakeNode): Promise<void> {
+  const pending = button.onclick?.();
+  const dialog = (document.body as unknown as FakeNode).find('dialog');
+  assert.ok(dialog, 'script opt-in requires confirmation');
+  dialog.close('accept');
+  await pending;
+}
+
+test('canceling script confirmation keeps the preview inert', async () => {
+  await withFakeDom(async () => {
+    const { root, calls } = await mountHtml({ enableHtmlScripts: async () => ({ url: 'buoyhtml://localhost/cancel' }) });
+    const pending = root.findClass('fv-scripts')?.onclick?.();
+    const dialog = (document.body as unknown as FakeNode).find('dialog');
+    assert.ok(dialog);
+    dialog.close();
+    await pending;
+    assert.ok(!calls.includes('enableHtmlScripts'));
+    assert.equal(root.find('iframe')?.getAttribute('sandbox'), '');
+  });
+});
 
 // TC-FV1 extension detection
 test('TC-FV1 extOf', () => {
@@ -275,7 +312,7 @@ test('TC-FV13 enabling scripts uses a separate origin and stays cross-origin', a
     const { root, calls } = await mountHtml({ enableHtmlScripts: async () => ({ url: URL_ }) });
     const btn = root.findClass('fv-scripts');
     assert.ok(btn?.onclick);
-    await btn.onclick();
+    await acceptScripts(btn);
 
     assert.ok(calls.includes('enableHtmlScripts'), 'the click drives the opt-in command');
     const frame = root.find('iframe');
@@ -300,7 +337,7 @@ test('TC-FV14 script opt-in does not leak to a new tab', async () => {
     const first = await mountHtml(api);
     const btn = first.root.findClass('fv-scripts');
     assert.ok(btn?.onclick);
-    await btn.onclick();
+    await acceptScripts(btn);
     assert.equal(first.root.find('iframe')?.getAttribute('sandbox'), 'allow-scripts');
 
     const second = await mountHtml(api);            // same path, fresh tab

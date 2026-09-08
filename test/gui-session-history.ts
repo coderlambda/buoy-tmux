@@ -9,6 +9,7 @@ describe('Tauri UI: durable session lifecycle', () => {
     await fire('ready', { id: 's1' });
 
     await js(`window.__testType('echo recover-this-tab\\r')`);
+    await $('.workspace-menu').click();
     await $('.act.detach').click();
     await browser.waitUntil(async () => js(`document.querySelector('#sessions .session .sub').textContent.includes('detached')`));
     const detached = await js(`({
@@ -32,8 +33,9 @@ describe('Tauri UI: durable session lifecycle', () => {
     await fire('window', { id: 's1', action: 'active', window: '@0', order: ['@0'] });
     await fire('ready', { id: 's1' });
 
-    await js(`window.confirm = () => true`);
+    await $('.workspace-menu').click();
     await $('.act.kill').click();
+    await $('[data-confirm="accept"]').click();
     await browser.waitUntil(async () => js(`document.querySelectorAll('#history .session').length === 1`));
     const closed = await js(`(() => {
       const call = window.__invocations.filter(([name]) => name === 'session_close').pop();
@@ -47,6 +49,7 @@ describe('Tauri UI: durable session lifecycle', () => {
       `TC-SH3 Close archives a per-tab recovery snapshot (got ${JSON.stringify(closed)})`);
 
     await $('#history .resume').click();
+    await $('[data-confirm="accept"]').click();
     await browser.waitUntil(async () => js(`document.querySelectorAll('#sessions .session').length === 1 && document.querySelectorAll('#history .session').length === 0`));
     const resumed = await js(`({
       resumed: window.__invocations.some(([name]) => name === 'session_resume'),

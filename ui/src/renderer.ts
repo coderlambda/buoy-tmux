@@ -13,6 +13,8 @@ import {
 } from './terminalTab.js';
 import type { TerminalTabContext, TerminalTabSpec } from './terminalTab.js';
 import { createFileViewerTab } from './fileViewerTab.js';
+import { icon, iconButton, setIcon, hydrateIcons, openPanel, confirmAction, labelControl } from './uiControls.js';
+import type { IconName } from './uiControls.js';
 import type { FileViewerTabContext, FileViewerTabSpec } from './fileViewerTab.js';
 import type {
   CreateSessionMeta,
@@ -76,6 +78,7 @@ interface View {
   el: HTMLDivElement | null;
   tmuxVersion: number[] | undefined;
   tunnels: TunnelInfo[];
+  portsExpanded?: boolean;
   color: string | null;
   savedTabOrder: string[];
   tabOrder?: string[];
@@ -124,6 +127,47 @@ const historyPanel = requiredElement<HTMLElement>('history-panel');
 const statusEl = requiredElement<HTMLElement>('status');
 const termHost = requiredElement<HTMLElement>('term');
 const recoverButton = requiredElement<HTMLButtonElement>('recover');
+hydrateIcons();
+let historyOpen = false;
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
+const portPending = new Set<string>();
+const portErrors = new Map<string, string>();
+
+function showToast(message: string): void {
+  document.querySelector('.toast')?.remove();
+  clearTimeout(toastTimer);
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.setAttribute('role', 'status');
+  toast.textContent = message;
+  document.body.append(toast);
+  toastTimer = setTimeout(() => toast.remove(), 4000);
+}
+
+function updateShell(): void {
+  const history = historyOpen;
+  historyPanel.hidden = !history;
+  termHost.hidden = history || !activeId;
+  requiredElement('empty-state').hidden = history || !!activeId;
+  tabsEl.hidden = history;
+  requiredElement('show-history').setAttribute('aria-pressed', String(history));
+  requiredElement('history-empty').hidden = [...views.values()].some(v => v.meta.archived);
+}
+
+function showHistory(show: boolean): void {
+  historyOpen = show;
+  updateShell();
+  if (!show) { requestAnimationFrame(applyResize); repaintActivePane(); }
+}
+
+function toggleSidebar(): void {
+  requiredElement('app').classList.toggle('sidebar-collapsed');
+  requestAnimationFrame(applyResize);
+}
+requiredElement('collapse-sidebar').onclick = toggleSidebar;
+requiredElement('restore-sidebar').onclick = toggleSidebar;
+requiredElement('show-history').onclick = () => showHistory(!historyOpen);
+requiredElement('history-back').onclick = () => showHistory(false);
 
 function trackCommandInput(tab: AppTab | null, data: string): void {
   if (!tab || !data) return;
@@ -154,7 +198,8 @@ function trackCommandInput(tab: AppTab | null, data: string): void {
 // connecting or its link is broken, so the user can't type into a session that can't receive it.
 const termGate = document.createElement('div');
 termGate.className = 'term-gate';
-const termGateBadge = document.createElement('div');
+const termGateBadge = document.createElement('button');
+termGateBadge.type = 'button';
 termGateBadge.className = 'gate-badge';
 termGate.appendChild(termGateBadge);
 termHost.appendChild(termGate);
@@ -261,7 +306,16 @@ function dbg(...a: unknown[]): void {
 }
 
 function setStatus(t: string): void { setStatusRaw(t); }
-function setStatusRaw(t: string): void { statusEl.textContent = t; }
+function setStatusRaw(t: string): void {
+  requiredElement('status-message').textContent = t;
+  statusEl.title = t;
+  const v = activeId ? views.get(activeId) : undefined;
+  const plain = v?.meta.mode === 'local';
+  requiredElement('status-mode').innerHTML = icon('terminal') + (plain ? 'shell' : 'tmux');
+  requiredElement('status-transport').innerHTML = icon(v?.meta.host ? 'globe' : 'laptop');
+  labelControl(requiredElement('status-transport'), v?.meta.host || 'Local');
+  if (/failed|could not|⚠/i.test(t)) showToast(t);
+}
 
 // §18: loopback host set (from the host config; default localhost/127.0.0.1). Loaded at startup.
 let loopbackHosts = ['localhost', '127.0.0.1'];
@@ -332,6 +386,7 @@ function synchronizeMountedTerminalGrids(v: View, visible: AppTab, size: Termina
 
 function currentLayout(v: View, tab: AppTab, generation: number): boolean {
   return generation === v.layoutGeneration
+    && !termHost.hidden
     && v.meta.id === activeId
     && activeTab(v) === tab
     && !!tab.mounted;
@@ -439,7 +494,7 @@ function markTabNotification(v: View, tab: AppTab): void {
   if (!v || !tab || tab.unreadNotification) return;
   // The visible tab already has the user's attention. Consume the event without manufacturing an
   // unread state that can only be cleared by leaving and returning to the same tab.
-  if (v.meta.id === activeId && activeTab(v) === tab) return;
+  if (v.meta.id === activeId && activeTab(v) === tab && !termHost.hidden) return;
   tab.unreadNotification = true;
   renderSidebar();
   if (v.meta.id === activeId) renderTabs(v);
@@ -501,30 +556,18 @@ function refreshTunnels(id: string): void {
 type ChooserItem = readonly [label: string, action: () => unknown];
 
 function showChooser(titleText: string, items: readonly ChooserItem[]): void {
-  const back = document.createElement('div');
-  back.className = 'chooser-back';
-  const box = document.createElement('div');
-  box.className = 'chooser';
-  const title = document.createElement('div'); title.className = 'chooser-title'; title.textContent = titleText;
-  box.appendChild(title);
-  // Unregister the key listener in close() itself, not in the Escape branch: close() is also reached
-  // from the backdrop and from every item button, and those paths used to leave the listener (and the
-  // DOM nodes it captured) attached to `document` forever — one leak per chooser use.
-  const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
-  const close = () => {
-    document.removeEventListener('keydown', esc);
-    if (back.parentNode) back.parentNode.removeChild(back);
-  };
-  items.forEach(([label, fn]) => {
-    const b = document.createElement('button');
-    b.className = 'chooser-item'; b.textContent = label;
-    b.onclick = () => { close(); try { fn(); } catch (_) {} };
-    box.appendChild(b);
-  });
-  back.appendChild(box);
-  back.onclick = (e) => { if (e.target === back) close(); };
-  document.addEventListener('keydown', esc);
-  document.body.appendChild(back);
+  const panel = openPanel(titleText);
+  panel.dialog.querySelector('h2')?.classList.add('chooser-title');
+  const grid = document.createElement('div'); grid.className = 'action-grid';
+  for (const [label, action] of items) {
+    const name: IconName = label.startsWith('Copy') ? 'copy' : label.includes('tunnel') ? 'ports' : label.startsWith('Preview') ? 'file' : label.startsWith('Reattach') ? 'restore' : 'open';
+    const button = iconButton(name, label, () => { panel.dialog.close(); return action(); });
+    button.classList.add('chooser-item');
+    const text = document.createElement('span'); text.textContent = label;
+    text.className = label.startsWith('Reattach') ? 'chooser-identity' : 'sr-only';
+    button.append(text); grid.append(button);
+  }
+  panel.content.append(grid);
 }
 
 // §18: Shift+Cmd chooser — pick where to open a URL. Loopback URLs offer tunnel-open; all URLs
@@ -661,6 +704,8 @@ async function mount(id: string, userInitiated = false): Promise<void> {
   // during the connect was dropped for UI purposes — the console gate and tab strip stayed stale
   // over a live terminal until some later unrelated event re-rendered them.
   activeId = id;
+  historyOpen = false;
+  updateShell();
   // Non-control sessions have no inner tab strip to click. Treat clicking their session card as
   // viewing/acknowledging the sole implicit tab. Native-tab sessions keep each dot until that exact
   // tab header is clicked, so a session-level rollup never clears unrelated child notifications.
@@ -801,154 +846,200 @@ setInterval(() => {
   lastWakeTick = now;
 }, WAKE_POLL_MS);
 
+function control(name: IconName, label: string, classes = ''): string {
+  const button = iconButton(name, label);
+  button.className += ' ' + classes;
+  return button.outerHTML;
+}
+
 function renderHistorySession(id: string, v: View): void {
   const li = document.createElement('li');
   li.className = 'session history-session';
   li.dataset.id = id;
-  const closed = v.meta.archivedAt && Number.isFinite(v.meta.archivedAt)
-    ? `Closed ${new Date(v.meta.archivedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
-    : 'Closed';
-  const location = v.meta.host || 'local shell';
-  li.innerHTML = `<span class="status-dots"><span class="dot closed"></span></span>
-    <span class="body">
-      <span class="name-row"><span class="name">${escapeHtml(v.meta.title || v.meta.session)}</span></span>
-      <span class="sub">${escapeHtml(closed)} · ${escapeHtml(location)}</span>
-    </span>
-    <span class="history-actions">
-      <button class="resume" type="button">Resume</button>
-      <button class="delete" type="button" title="Delete this saved history entry">Delete</button>
-    </span>`;
-  requiredDescendant<HTMLElement>(li, '.resume').onclick = (event) => {
-    event.stopPropagation();
-    void resumeSession(id);
-  };
-  requiredDescendant<HTMLElement>(li, '.delete').onclick = (event) => {
-    event.stopPropagation();
-    void killSession(id);
-  };
-  li.onclick = () => { void resumeSession(id); };
+  const closed = v.meta.archivedAt ? new Date(v.meta.archivedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Closed';
+  li.innerHTML = `<span class="body"><span class="name-row"><span class="name">${escapeHtml(v.meta.title || v.meta.session)}</span></span>
+    <span class="sub">${escapeHtml(v.meta.host || 'Local')} · ${escapeHtml(closed)} · ${v.meta.recoveryTabs?.length || 0}</span></span>
+    <span class="history-actions">${control('restore', 'Restore workspace', 'resume')}${control('delete', 'Delete saved recovery entry', 'delete danger')}</span>`;
+  requiredDescendant<HTMLElement>(li, '.resume').onclick = () => { void reviewRecovery(id); };
+  requiredDescendant<HTMLElement>(li, '.delete').onclick = () => { void killSession(id); };
   historyEl.appendChild(li);
+}
+
+function renderTunnels(id: string, v: View): string {
+  const visible = v.portsExpanded ? v.tunnels : v.tunnels.slice(0, 1);
+  const rows = visible.map(t => {
+    const key = `${id}:${t.remote}`, busy = portPending.has(key), same = t.local === t.remote;
+    const error = portErrors.get(key);
+    const mapping = same ? String(t.remote) : `${t.remote}→${t.local || '—'}`;
+    return `<span class="tunnel${t.active ? '' : ' inactive'}" data-remote="${t.remote}" aria-busy="${busy}">
+      <button type="button" class="tunnel-link" title="${escapeHtml(`SSH tunnel · ${v.meta.host} · Remote :${t.remote} → localhost:${t.local || '—'} · ${t.active ? 'Open in browser' : 'Reopen forward'}`)}" ${busy ? 'disabled' : ''}>${mapping}</button>
+      <span class="tunnel-actions">${control(busy ? 'loading' : 'equal', same && t.active ? `Already using the same port · Local :${t.remote}` : `Use same port · Local :${t.remote}`, 'tforce' + (same && t.active ? ' same' : ''))}${control('open', t.active ? `Open localhost:${t.local}` : 'Reopen forward', 'topen')}${control('x', 'Stop forwarding · Keep remote service running', 'tclose')}</span>
+      ${error ? control('error', error, 'tunnel-error') : ''}</span>`;
+  }).join('');
+  const more = v.tunnels.length > 1 ? `<button type="button" class="tunnels-toggle" aria-expanded="${!!v.portsExpanded}" title="${v.portsExpanded ? 'Collapse port list' : 'Show more forwards'}">${icon(v.portsExpanded ? 'fold' : 'expand')}${v.portsExpanded ? '' : '+' + (v.tunnels.length - 1)}</button>` : '';
+  const empty = v.portsExpanded && !v.tunnels.length ? `<span class="tunnels-toggle" title="Open a remote localhost link in the terminal to create an SSH tunnel.">${icon('ports')}0</span>` : '';
+  return rows || more || empty ? `<span class="tunnels">${rows}${more}${empty}</span>` : '';
+}
+
+async function runPortAction(id: string, remote: number, action: 'same' | 'open' | 'stop'): Promise<void> {
+  const v = views.get(id), key = `${id}:${remote}`;
+  const tunnel = v?.tunnels.find(t => t.remote === remote);
+  if (!v || !tunnel || portPending.has(key)) return;
+  if (action === 'same' && tunnel.active && tunnel.local === remote) return;
+  if (action !== 'stop' && (v.meta.detached || v.state === 'dead' || v.state === 'closed' || v.state === 'reconnecting')) {
+    const message = 'Reconnect this workspace to update its forward.';
+    portErrors.set(key, message); renderSidebar(); showToast(message); return;
+  }
+  portPending.add(key); portErrors.delete(key); renderSidebar();
+  try {
+    if (action === 'stop') {
+      await api.closeTunnel(id, remote);
+      v.tunnels = v.tunnels.filter(t => t.remote !== remote);
+      showToast('Forward stopped');
+    } else if (action === 'same') {
+      await api.forceForward(id, remote);
+      showToast(`Now forwarding :${remote} → :${remote}`);
+    } else if (tunnel.active && tunnel.local) {
+      await api.openExternal(`http://localhost:${tunnel.local}/`);
+    } else {
+      await api.openForwardedUrl(id, `http://localhost:${remote}/`);
+    }
+    if (views.get(id) === v) v.tunnels = await api.listTunnels(id);
+  } catch (error) {
+    const message = errorMessage(error);
+    portErrors.set(key, message);
+    setStatus('Could not update port ' + remote + ': ' + message);
+  } finally {
+    portPending.delete(key);
+    renderSidebar();
+  }
 }
 
 function renderSidebar() {
   sessionsEl.innerHTML = '';
   historyEl.innerHTML = '';
   const activeViews = [...views].filter(([, view]) => !view.meta.archived);
-  const archivedViews = [...views]
-    .filter(([, view]) => !!view.meta.archived)
+  const archivedViews = [...views].filter(([, view]) => !!view.meta.archived)
     .sort(([, a], [, b]) => (b.meta.archivedAt || 0) - (a.meta.archivedAt || 0));
   for (const [id, v] of activeViews) {
     const li = document.createElement('li');
     li.className = 'session' + (id === activeId ? ' active' : '') + (v.state === 'dead' ? ' dead' : '');
-    // NB: deliberately NOT `draggable = true` — reordering is pointer-driven (§24). Setting it would
-    // hand the gesture back to the native drag machinery that swallows it in the first place.
     li.dataset.id = id;
-    if (v.color) li.style.setProperty('--accent-bar', v.color);   // left accent bar (CSS uses it)
+    if (v.color) li.style.setProperty('--accent-bar', v.color);
     li.classList.toggle('has-color', !!v.color);
-    // Subtitle: the host for a remote session, "local shell" for a local one. Both append the tmux
-    // version when known — a local session runs a real tmux too (§5.3b), so it earns the same badge;
-    // its absence is the visible signal that this machine has no tmux and the session isn't durable.
-    const ver = v.tmuxVersion ? ` · tmux ${v.tmuxVersion.join('.')}` : '';
-    const detachedState = v.meta.detached
-      ? ` · detached${v.remoteOpen === true ? ' · open' : v.remoteOpen === false ? ' · not found' : ''}`
-      : '';
-    const sub = (v.meta.host ? escapeHtml(v.meta.host) : 'local shell') + ver + detachedState;
-    // §18: forwarded ports under the project name. Active rows show the local port and open on
-    // click; inactive (grey) rows are persisted-but-not-serving — click re-opens the tunnel.
-    // String is short: ":<remote> → :<local>" (local shows "—" when not currently mapped).
-    // These values are ports (numbers) today, so nothing here can currently break out of the
-    // attribute — but this is an innerHTML sink, so escape like every other one (the tab-title and
-    // host sinks below/above do). Keeps one schema change from turning this into attribute XSS.
-    const tunnelRows = (v.tunnels || []).map((t) => {
-      const active = !!t.active;
-      const remote = escapeHtml(t.remote);
-      const localTxt = t.local ? `:${escapeHtml(t.local)}` : '—';
-      const title = escapeHtml(active ? `open http://localhost:${t.local}/` : `port ${t.remote} inactive — click to re-open`);
-      // "same" marker when the local port matches the remote (forced same-port mapping).
-      const same = t.local && t.local === t.remote;
-      return `<span class="tunnel${active ? '' : ' inactive'}" data-remote="${remote}" title="${title}">
-         <span class="tport">:${remote}</span><span class="tarrow">→</span>
-         <span class="tlocal${same ? ' same' : ''}">${localTxt}</span>
-         <span class="tforce" title="force map to the same local port (:${remote})">⇄</span>
-         <span class="tclose" title="close tunnel">×</span>
-       </span>`;
-    }).join('');
-    // The action icons live INSIDE the first (name) row, so hovering shifts only that row — the
-    // sub line and tunnel rows below keep full width.
-    li.innerHTML = `<span class="status-dots">
-        <span class="dot ${v.state}"></span>
-        ${sessionHasUnreadNotification(v) ? '<span class="notification-dot" aria-label="Unread notification"></span>' : ''}
-      </span>
-      <span class="body">
-        <span class="name-row">
-          <span class="name" title="double-click to rename">${escapeHtml(v.meta.title || v.meta.session || v.meta.kind)}</span>
-          <span class="controls">
-            <span class="retry${reconnectBusy(id) ? ' busy' : ''}">retry</span>
-            <span class="act reconnect${reconnectBusy(id) ? ' busy' : ''}" title="${reconnectBusy(id) ? 'Reconnecting…' : 'Force reconnect now'}">⟳</span>
-            <span class="act detach" title="Detach (keeps tmux running)">⤫</span>
-            <span class="act kill" title="Close (ends tmux and saves recovery state)">⏻</span>
-          </span>
-        </span>
-        <span class="sub">${sub}</span>
-        ${tunnelRows ? `<span class="tunnels">${tunnelRows}</span>` : ''}
-      </span>`;
+    const state = v.meta.detached ? 'detached' : v.state;
+    const detail = `${v.meta.host || 'Local'} · ${state}${v.tmuxVersion ? ' · tmux ' + v.tmuxVersion.join('.') : ''}`;
+    li.innerHTML = `<span class="status-dots"><button type="button" class="icon-button connection" title="${escapeHtml(detail + ' · Connection details')}" aria-label="${escapeHtml(detail + ' · Connection details')}"><span class="dot ${v.meta.detached ? 'closed' : v.state}"></span></button></span>
+      <span class="body"><span class="name-row"><span class="name" role="button" tabindex="0" title="${escapeHtml(detail + ' · Double-click to rename')}">${escapeHtml(v.meta.title || v.meta.session || v.meta.kind)}</span>
+      ${sessionHasUnreadNotification(v) ? '<span class="notification-dot" aria-label="Unread notification"></span>' : ''}
+      <span class="controls">${control('more', 'Workspace actions', 'workspace-menu')}</span></span>
+      <span class="sub">${escapeHtml(detail)}</span>${renderTunnels(id, v)}</span>`;
     const nameEl = requiredDescendant<HTMLElement>(li, '.name');
-    // Rename editor is rebuilt from view state on every render, so it survives the re-renders the
-    // double-click itself triggers (see startRename).
     if (v.renaming) mountRenameInput(v, nameEl, id);
-    // Double-click the name to rename (display title only; tmux session name unchanged).
-    nameEl.ondblclick = (e) => { e.stopPropagation(); startRename(id); };
-    requiredDescendant<HTMLElement>(li, '.reconnect').onclick = (e) => { e.stopPropagation(); forceReconnect(id); };
-    requiredDescendant<HTMLElement>(li, '.detach').onclick = (e) => { e.stopPropagation(); void detachSession(id); };
-    requiredDescendant<HTMLElement>(li, '.kill').onclick = (e) => { e.stopPropagation(); void closeSession(id); };
-    // tunnel rows: active -> open the local URL; inactive -> re-open; ⇄ force same-port; × close.
-    li.querySelectorAll<HTMLElement>('.tunnel').forEach((el) => {
-      const remote = Number(el.getAttribute('data-remote'));
-      requiredDescendant<HTMLElement>(el, '.tclose').onclick = (e) => { e.stopPropagation(); void api.closeTunnel(id, remote); };
-      // ⇄ force-map to the SAME local port; alert if that local port is already taken.
-      requiredDescendant<HTMLElement>(el, '.tforce').onclick = (e) => {
-        e.stopPropagation();
-        setStatus('mapping port ' + remote + ' -> localhost:' + remote + '…');
-        api.forceForward(id, remote)
-          .then(() => { setStatus('mapped localhost:' + remote); refreshTunnels(id); })
-          .catch((err: unknown) => { const m = errorMessage(err); setStatus('⚠ ' + m); alert('Could not map port ' + remote + ':\n' + m); });
-      };
-      el.onclick = (e) => {
-        if (e.target instanceof Element && (e.target.classList.contains('tclose') || e.target.classList.contains('tforce'))) return;
-        e.stopPropagation();
-        const t = (v.tunnels || []).find((x) => x.remote === remote);
-        if (t && t.active && t.local) {
-          api.openExternal('http://localhost:' + t.local + '/');
-        } else {
-          // inactive/persisted: re-open the tunnel to the remote port (recreates ssh -L + opens).
-          setStatus('re-opening port ' + remote + '…');
-          api.openForwardedUrl(id, 'http://localhost:' + remote + '/')
-            .then(() => refreshTunnels(id)).catch(() => {});
-        }
-      };
-    });
-    li.onclick = (e) => {
-      if (e.target instanceof Element && e.target.classList.contains('retry')) {
-        if (!reconnectBusy(id)) { markReconnecting(id); api.retry(id); renderSidebar(); }
-        return;
-      }
-      if (v.renaming) return;                     // ignore clicks while editing this row
-      // A double-click on the NAME is the rename gesture, so don't also treat its clicks as
-      // "switch to this project": mounting an unconnected project spawns a backend, and the second
-      // click's re-render is what used to destroy the rename editor. detail >= 2 is the second click
-      // of a double-click; a single click anywhere in the row still mounts as before.
-      if (e.detail >= 2 && e.target instanceof Node && nameEl.contains(e.target)) return;
-      mount(id, true);
+    nameEl.ondblclick = e => { e.stopPropagation(); startRename(id); };
+    nameEl.onkeydown = e => {
+      if (e.target instanceof HTMLInputElement) return;
+      if (e.key === 'F2') { e.preventDefault(); startRename(id); }
+      else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void mount(id, true); }
     };
-    // §20: right-click opens the color palette for this project.
-    li.oncontextmenu = (e) => { e.preventDefault(); openColorMenu(e, v.color, (c) => setProjectColor(id, c)); };
-    // §20: drag-to-reorder (project list).
+    requiredDescendant<HTMLElement>(li, '.connection').onclick = e => { e.stopPropagation(); showConnection(id); };
+    requiredDescendant<HTMLElement>(li, '.workspace-menu').onclick = e => { e.stopPropagation(); showWorkspaceActions(id); };
+    li.querySelectorAll<HTMLElement>('.tunnel').forEach(el => {
+      const remote = Number(el.dataset.remote), key = `${id}:${remote}`;
+      const same = v.tunnels.some(t => t.remote === remote && t.local === remote && t.active);
+      const button = requiredDescendant<HTMLElement>(el, '.tforce');
+      button.setAttribute('aria-disabled', String(same || portPending.has(key)));
+      el.querySelectorAll<HTMLButtonElement>('button').forEach(b => { b.disabled = portPending.has(key); });
+      for (const [selector, action] of [['.tforce', 'same'], ['.topen', 'open'], ['.tunnel-link', 'open'], ['.tclose', 'stop']] as const) {
+        requiredDescendant<HTMLElement>(el, selector).onclick = e => { e.stopPropagation(); void runPortAction(id, remote, action); };
+      }
+      el.onclick = e => e.stopPropagation();
+    });
+    const expand = li.querySelector<HTMLButtonElement>('button.tunnels-toggle');
+    if (expand) expand.onclick = e => { e.stopPropagation(); v.portsExpanded = !v.portsExpanded; renderSidebar(); };
+    li.onclick = e => {
+      if (v.renaming || (e.detail >= 2 && e.target instanceof Node && nameEl.contains(e.target))) return;
+      void mount(id, true);
+    };
+    li.oncontextmenu = e => { e.preventDefault(); openColorMenu(e, v.color, c => setProjectColor(id, c)); };
     wireSidebarDnD(li, id);
     sessionsEl.appendChild(li);
   }
   for (const [id, view] of archivedViews) renderHistorySession(id, view);
-  historyPanel.toggleAttribute('hidden', archivedViews.length === 0);
-  sessionsEl.toggleAttribute('hidden', activeViews.length === 0);
+  sessionsEl.hidden = false;
+  updateShell();
+}
+
+function showWorkspaceActions(id: string): void {
+  const v = views.get(id); if (!v) return;
+  const panel = openPanel(v.meta.title || v.meta.session);
+  const grid = document.createElement('div'); grid.className = 'action-grid';
+  const add = (name: IconName, title: string, action: () => unknown, cls = '') => {
+    const button = iconButton(name, title, () => { panel.dialog.close(); return action(); });
+    button.className += ' ' + cls; grid.append(button); return button;
+  };
+  add('rename', 'Rename workspace', () => startRename(id));
+  add('info', 'Connection details', () => showConnection(id));
+  const reconnect = add('refresh', 'Reconnect to the same session', () => forceReconnect(id), 'act reconnect');
+  reconnect.disabled = v.meta.mode !== 'control' || reconnectBusy(id);
+  const detach = add('detach', 'Detach · Keep tmux running', () => detachSession(id), 'act detach');
+  detach.disabled = v.meta.mode === 'local';
+  add('end', 'End session · Save recovery state', () => closeSession(id), 'act kill danger');
+  const ids = [...views].filter(([, item]) => !item.meta.archived).map(([key]) => key), position = ids.indexOf(id);
+  add('up', 'Move workspace up', () => reorderProjectByIndex(position, position - 1)).disabled = position <= 0;
+  add('down', 'Move workspace down', () => reorderProjectByIndex(position, position + 1)).disabled = position >= ids.length - 1;
+  if (v.meta.host) add('ports', 'SSH tunnels', () => { v.portsExpanded = true; renderSidebar(); });
+  panel.content.append(grid);
+  appendPalette(panel.content, v.color, color => setProjectColor(id, color));
+}
+
+function appendPalette(parent: HTMLElement, current: string | null | undefined, pick: (color: string | null) => void): void {
+  const palette = document.createElement('div'); palette.className = 'palette-row';
+  for (const color of [null, ...PALETTE]) {
+    const swatch = document.createElement('button'); swatch.type = 'button';
+    swatch.className = 'color-swatch' + (color === (current || null) ? ' sel' : '') + (!color ? ' none' : '');
+    swatch.style.background = color || 'var(--bg)';
+    labelControl(swatch, color ? 'Set color ' + color : 'Default color');
+    swatch.setAttribute('aria-pressed', String(color === (current || null)));
+    if (!color) swatch.textContent = '×';
+    swatch.onclick = () => { pick(color); for (const el of palette.children) { el.classList.toggle('sel', el === swatch); el.setAttribute('aria-pressed', String(el === swatch)); } };
+    palette.append(swatch);
+  }
+  parent.append(palette);
+}
+
+function showConnection(id: string): void {
+  const v = views.get(id); if (!v) return;
+  const panel = openPanel('Connection');
+  const details = document.createElement('dl'); details.className = 'dialog-details';
+  for (const [label, value] of [['Host', v.meta.host || 'Local'], ['Session', v.meta.session], ['Status', v.meta.detached ? 'Detached' : v.state], ['Mode', v.meta.mode === 'control' ? 'Native tabs' : v.meta.mode === 'local' ? 'Plain shell' : 'tmux'], ['tmux', v.tmuxVersion?.join('.') || '—']]) {
+    const row = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd');
+    dt.textContent = label || ''; dd.textContent = value || ''; row.append(dt, dd); details.append(row);
+  }
+  panel.content.append(details);
+  const footer = document.createElement('footer'); footer.className = 'dialog-footer';
+  const reconnect = iconButton('refresh', 'Reconnect', () => { panel.dialog.close(); forceReconnect(id); });
+  reconnect.disabled = v.meta.mode !== 'control' || reconnectBusy(id);
+  const detach = iconButton('detach', 'Detach · Keep tmux running', () => { panel.dialog.close(); void detachSession(id); });
+  detach.disabled = v.meta.mode === 'local';
+  footer.append(reconnect, detach); panel.content.append(footer);
+}
+
+async function reviewRecovery(id: string): Promise<void> {
+  const v = views.get(id); if (!v?.meta.archived) return;
+  try {
+    const saved = (await api.listSessions()).find(meta => meta.id === id);
+    if (saved?.recoveryTabs?.length) v.meta.recoveryTabs = saved.recoveryTabs;
+  } catch (_) { /* Keep the locally saved window names if the store cannot be read. */ }
+  if (views.get(id) !== v || !v.meta.archived) return;
+  const list = document.createElement('ul'); list.className = 'recovery-list';
+  for (const tab of v.meta.recoveryTabs || []) {
+    const li = document.createElement('li'); li.textContent = tab.title || tab.window;
+    const cwd = document.createElement('small'); cwd.textContent = tab.cwd || 'Saved working directory'; li.append(cwd);
+    if (tab.lastCommand) { const cmd = document.createElement('small'); cmd.textContent = tab.lastCommand; li.append(cmd); }
+    list.append(li);
+  }
+  if (await confirmAction('Restore ' + (v.meta.title || v.meta.session), 'Open new shells in saved directories. Previous processes and unsaved work are not restored. Saved commands are not run.', 'Restore workspace', false, list)) await resumeSession(id);
 }
 
 // --- §20/§24: drag-to-reorder, on POINTER events (not HTML5 drag-and-drop) --------------------
@@ -1035,7 +1126,7 @@ function wirePointerDrag(
     if (_drag) return;                                // a gesture is already in flight
     // Don't hijack a press on something interactive: the action icons, the port rows, the ×, or a
     // live rename editor. Those are clicks/edits (or text selection), not drags.
-    if (e.target instanceof Element && e.target.closest('input, .controls, .tunnel, .tclose, .plus')) return;
+    if (e.target instanceof Element && e.target.closest('input, button, .controls, .tunnel, .tclose, .plus')) return;
     // Nor while THIS item is being renamed. The editor survives a reorder (it's rebuilt from view
     // state, §23), but dragging a row you're mid-way through naming isn't a gesture anyone intends,
     // and `li.onclick` already ignores clicks while renaming — the two should agree.
@@ -1260,7 +1351,7 @@ function removeView(id: string): void {
     activeId = null;
     tabsEl.className = ''; tabsEl.innerHTML = '';
     const next = firstActiveViewId(id);
-    if (next) void mount(next); else { termHost.innerHTML = ''; setStatus('no active sessions'); }
+    if (next) void mount(next); else { termHost.replaceChildren(termGate); setStatus('no active sessions'); }
   }
   renderSidebar();
 }
@@ -1295,7 +1386,7 @@ async function detachSession(id: string): Promise<void> {
     activeId = null;
     tabsEl.className = ''; tabsEl.innerHTML = '';
     const next = firstActiveViewId(id);
-    if (next) void mount(next); else { termHost.innerHTML = ''; setStatus('detached — click the session to reattach'); }
+    if (next) void mount(next); else { termHost.replaceChildren(termGate); setStatus('detached — click the session to reattach'); }
   } else {
     setStatus('detached (still running on the remote)');
   }
@@ -1317,14 +1408,14 @@ async function closeSession(id: string): Promise<void> {
   const v = views.get(id);
   if (!v) return;
   if (v.meta.mode === 'local') {
-    if (!confirm('Close this local shell?\n\nIt is not backed by tmux and cannot be resumed.')) return;
+    if (!await confirmAction('End local shell', 'This shell has no tmux backing. Ending it stops its processes and it cannot be restored.', 'End shell', true)) return;
     try { await api.kill(id); } catch (_) {}
     removeView(id);
     return;
   }
   const label = v.meta.title || v.meta.session;
   const location = v.meta.transport === 'local' ? 'local' : 'remote';
-  if (!confirm(`Close "${label}"?\n\nThis ends the ${location} tmux session. Buoy will save each tab's working directory and last command so it can be reconstructed from History.`)) return;
+  if (!await confirmAction('End session', `End "${label}" and its ${location} processes? Window directories and last commands will be saved to History.`, 'End session', true)) return;
 
   if (!v.started) {
     await mount(id);
@@ -1353,6 +1444,7 @@ async function closeSession(id: string): Promise<void> {
   v.state = 'idle';
   v.inputReady = false;
   v.meta.archived = true;
+  if ([...views.values()].every(view => view.meta.archived)) historyOpen = true;
   v.meta.archivedAt = Date.now();
   v.meta.detached = false;
   v.meta.recoveryTabs = hints;
@@ -1361,7 +1453,7 @@ async function closeSession(id: string): Promise<void> {
     activeId = null;
     tabsEl.className = ''; tabsEl.innerHTML = '';
     const next = firstActiveViewId(id);
-    if (next) void mount(next); else termHost.innerHTML = '';
+    if (next) void mount(next); else termHost.replaceChildren(termGate);
   }
   setStatus(`${label} closed and moved to History`);
   renderSidebar();
@@ -1437,7 +1529,9 @@ function forceReconnect(id: string): void {
   v.inputReady = false;
   if (id === activeId) updateConsoleGate();
   setStatus('reconnecting…');
-  api.forceReconnect(id);
+  Promise.resolve(api.forceReconnect(id)).catch(error => {
+    clearReconnect(id); setStatus('Reconnect failed: ' + errorMessage(error)); renderSidebar();
+  });
   renderSidebar();
 }
 
@@ -1449,7 +1543,7 @@ async function killSession(id: string): Promise<void> {
   const message = archived
     ? `Delete "${label}" from History?\n\nThe tmux session was already closed. This removes Buoy's recovery snapshot and cannot be undone.`
     : `Delete "${label}" permanently?\n\nThis ends the tmux session and everything running in it, then removes its saved entry. This cannot be undone.`;
-  if (!confirm(message)) return;
+  if (!await confirmAction(archived ? 'Delete recovery entry' : 'Delete session', message, 'Delete permanently', true)) return;
   setStatus(archived ? `deleting ${label} from History…` : `deleting ${label}…`);
   try {
     const res = await api.kill(id);
@@ -1879,7 +1973,7 @@ function tabDisplayOrder(v: View): string[] {
 
 // Render the tab strip for the active control-mode project (hidden for plain/single).
 function renderTabs(v: View | null | undefined): void {
-  if (!v || v.meta.mode !== 'control') { tabsEl.className = ''; tabsEl.innerHTML = ''; return; }
+  if (!v || (v.meta.mode !== 'control' && ![...v.tabs.values()].some(t => t.viewer))) { tabsEl.className = ''; tabsEl.innerHTML = ''; return; }
   tabsEl.className = 'on';
   tabsEl.innerHTML = '';
   for (const wid of tabDisplayOrder(v)) {
@@ -1889,8 +1983,15 @@ function renderTabs(v: View | null | undefined): void {
     el.className = 'tab' + (wid === v.activeWindow ? ' active' : '') + (tab.closing ? ' closing' : '');
     const color = v.tabColors[wid];
     if (color) { el.style.setProperty('--tab-color', color); el.classList.add('has-color'); }
-    el.innerHTML = `<span class="tlabel" title="double-click to rename">${tab.unreadNotification ? '<span class="notification-dot" aria-label="Unread notification"></span>' : ''}<span class="ttext">${escapeHtml(tab.title || wid)}</span></span><span class="tclose" title="close">×</span>`;
+    el.innerHTML = `<span class="tlabel" title="${escapeHtml((tab.title || wid) + ' · Double-click to rename')}">${icon(tab.viewer ? 'file' : 'terminal')}<span class="ttext">${escapeHtml(tab.title || wid)}</span>${tab.unreadNotification ? '<span class="notification-dot" aria-label="Unread notification"></span>' : ''}</span>${control('x', tab.viewer ? 'Close preview' : 'End window', 'tclose')}`;
     const label = requiredDescendant<HTMLElement>(el, '.tlabel');
+    label.setAttribute('role', 'button'); label.tabIndex = 0;
+    label.setAttribute('aria-pressed', String(wid === v.activeWindow));
+    label.onkeydown = e => {
+      if (e.target instanceof HTMLInputElement) return;
+      if (e.key === 'F2' && isWindowTab(wid)) { e.preventDefault(); startTabRename(v, wid); }
+      else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchTab(v, wid, true); }
+    };
     // Editor rebuilt from tab state each render, so it survives the double-click's own re-renders.
     if (tab.renaming) mountTabRenameInput(v, wid, label);
     label.onclick = (e) => {
@@ -1911,17 +2012,36 @@ function renderTabs(v: View | null | undefined): void {
     wireTabDnD(el, v, wid);
     tabsEl.appendChild(el);
   }
-  // '+' new session in this project
-  const plus = document.createElement('div');
-  plus.className = 'tab plus'; plus.textContent = '+'; plus.title = 'New session in this project';
-  plus.onclick = () => api.tabNew(v.meta.id);
-  tabsEl.appendChild(plus);
+  if (v.meta.mode === 'control') {
+    const plus = iconButton('plus', 'New tmux window', () => api.tabNew(v.meta.id));
+    plus.classList.add('tab', 'plus');
+    tabsEl.appendChild(plus);
+  }
+  tabsEl.append(iconButton('more', 'Tab actions', () => showTabActions(v)));
+
 }
 
 function setTabColor(v: View, wid: string, color: string | null): void {
   if (color) v.tabColors[wid] = color; else delete v.tabColors[wid];
   renderTabs(v);
   api.setTabPrefs(v.meta.id, null, [wid, color || null]).catch(() => {});
+}
+
+function showTabActions(v: View): void {
+  const tab = activeTab(v); if (!tab) return;
+  const wid = tab.winId, panel = openPanel(tab.title || wid);
+  const grid = document.createElement('div'); grid.className = 'action-grid';
+  const add = (name: IconName, label: string, action: () => unknown) => {
+    const button = iconButton(name, label, () => { panel.dialog.close(); return action(); });
+    grid.append(button); return button;
+  };
+  if (isWindowTab(wid)) add('rename', 'Rename tab', () => startTabRename(v, wid));
+  const order = tabDisplayOrder(v), at = order.indexOf(wid);
+  add('back', 'Move tab left', () => reorderTabByIndex(v, at, at - 1)).disabled = at === 0;
+  add('next', 'Move tab right', () => reorderTabByIndex(v, at, at + 1)).disabled = at === order.length - 1;
+  add('x', tab.viewer ? 'Close preview' : 'End window', () => closeTab(v, wid)).classList.add('danger');
+  panel.content.append(grid);
+  appendPalette(panel.content, v.tabColors[wid], color => setTabColor(v, wid, color));
 }
 
 // §20/§24: tab reorder (horizontal), same pointer-drag mechanism as the sidebar — HTML5 DnD is
@@ -1971,8 +2091,12 @@ function rememberLastTab(v: View, winId: string): void {
 
 // Close a tab. Terminal tabs -> tmux kill-window (backend removes it, emits close). Viewer tabs
 // are app-local -> dispose locally, no tmux command, and re-focus a remaining tab.
-function closeTab(v: View, winId: string): void {
+async function closeTab(v: View, winId: string): Promise<void> {
   if (isWindowTab(winId)) {
+    const candidate = v.tabs.get(winId);
+    if (!candidate || candidate.closing) return;
+    if (!await confirmAction('End window', `End "${candidate.title || winId}" and its processes?`, 'End window', true)) return;
+    if (views.get(v.meta.id) !== v || v.tabs.get(winId) !== candidate) return;
     // The tab disappears only when tmux confirms via the window-close event, so give immediate
     // feedback and ignore repeat clicks — otherwise the unchanged tab invites a second kill-window.
     const t = v.tabs.get(winId);
@@ -1981,7 +2105,12 @@ function closeTab(v: View, winId: string): void {
       t.closing = true;
       if (v.meta.id === activeId) renderTabs(v);   // reflect the pending close in the strip
     }
-    api.tabClose(v.meta.id, winId);
+    try { await api.tabClose(v.meta.id, winId); }
+    catch (error) {
+      if (t) t.closing = false;
+      if (v.meta.id === activeId) renderTabs(v);
+      setStatus('Could not end window: ' + errorMessage(error));
+    }
     return;
   }
   const t = v.tabs.get(winId);
@@ -2023,6 +2152,7 @@ function byteLength(s: string): number { return new TextEncoder().encode(s).leng
 // no tmux round-trip.
 let _resizeTimer: ReturnType<typeof setTimeout> | null = null;
 function applyResize(): void {
+  if (termHost.hidden) return;
   const v = activeId ? views.get(activeId) : undefined;
   if (!v) return;
   const tab = activeTab(v);
@@ -2070,6 +2200,15 @@ const sessionForm = requiredElement<HTMLFormElement>('form');
 const discoverButton = requiredElement<HTMLButtonElement>('f-discover');
 const discoveryEl = requiredElement<HTMLElement>('tmux-discovery');
 const createButton = requiredElement<HTMLButtonElement>('f-ok');
+let importMode = false;
+function setImportMode(value: boolean): void {
+  importMode = value;
+  requiredElement('f-create-mode').setAttribute('aria-pressed', String(!value));
+  requiredElement('f-import-mode').setAttribute('aria-pressed', String(value));
+  requiredElement('dialog-title').textContent = value ? 'Import session' : 'New workspace';
+  requiredDescendant<HTMLElement>(dialog, '.discover-row').hidden = !value;
+  resetDiscovery();
+}
 let selectedDiscovered: DiscoveredTmuxSession | null = null;
 let discoveredTmuxPath: string | undefined;
 let discoveredTmuxVersion: number[] | undefined;
@@ -2081,6 +2220,8 @@ fControl.onclick = () => setNative(!fControl.classList.contains('on'));
 
 const updateFields = () => {
   const remote = fKind.value === 'remote';
+  requiredElement('f-remote').setAttribute('aria-pressed', String(remote));
+  requiredElement('f-local').setAttribute('aria-pressed', String(!remote));
   remoteFields.style.display = remote ? 'block' : 'none';
   // The local blurb replaces the ssh one; the Native-tabs toggle sits outside both and applies to
   // either kind, since a local session runs a real tmux too.
@@ -2095,8 +2236,8 @@ function resetDiscovery(): void {
   discoveryEl.className = '';
   discoveryEl.innerHTML = '';
   discoverButton.disabled = false;
-  discoverButton.textContent = 'Find existing tmux sessions';
-  createButton.textContent = 'Create';
+  setIcon(discoverButton, 'search', 'Find existing tmux sessions');
+  setIcon(createButton, importMode ? 'download' : 'next', importMode ? 'Import session' : 'Create workspace');
 }
 
 fKind.onchange = () => { updateFields(); resetDiscovery(); };
@@ -2105,10 +2246,37 @@ requiredElement<HTMLButtonElement>('new').addEventListener('click', () => {
   errorEl.textContent = '';
   setNative(true);                    // default to native mode each time the dialog opens
   updateFields();
-  resetDiscovery();
+  setImportMode(false);
   hideHostHistory();
   dialog.showModal();
+  (fKind.value === 'remote' ? fHost : titleInput).focus();
 });
+requiredElement('f-create-mode').onclick = () => setImportMode(false);
+requiredElement('f-import-mode').onclick = () => setImportMode(true);
+for (const kind of ['remote', 'local']) requiredElement('f-' + kind).onclick = () => {
+  fKind.value = kind; updateFields(); resetDiscovery();
+};
+labelControl(fControl, 'Native tabs · Requires tmux 3.2 or later');
+dialog.setAttribute('aria-labelledby', 'dialog-title');
+dialog.querySelectorAll<HTMLButtonElement>('button[value="cancel"]').forEach(button => {
+  button.type = 'button'; button.onclick = () => dialog.close('cancel');
+});
+dialog.addEventListener('click', event => {
+  if (event.target !== dialog) return;
+  const r = dialog.getBoundingClientRect();
+  if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) dialog.close('cancel');
+});
+requiredElement('empty-new').onclick = () => requiredElement('new').click();
+requiredElement('empty-import').onclick = () => { requiredElement('new').click(); setImportMode(true); };
+requiredElement('show-help').onclick = () => {
+  const panel = openPanel('Interactions');
+  const details = document.createElement('dl'); details.className = 'dialog-details';
+  for (const [action, gesture] of [['Rename', 'Double-click or F2'], ['Reorder', 'Drag'], ['Link options', 'Shift + Cmd/Ctrl + click'], ['Dismiss', 'Escape'], ['Forward ports', '= Same port · ↗ Open · × Stop']]) {
+    const row = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd');
+    dt.textContent = action || ''; dd.textContent = gesture || ''; row.append(dt, dd); details.append(row);
+  }
+  panel.content.append(details);
+};
 
 // --- host history dropdown ---
 let _hostHistory: string[] = [];
@@ -2154,8 +2322,8 @@ discoverButton.addEventListener('click', async () => {
   discoveryEl.className = '';
   discoveryEl.innerHTML = '';
   discoverButton.disabled = true;
-  discoverButton.textContent = 'Looking…';
-  createButton.textContent = 'Create';
+  setIcon(discoverButton, 'loading', 'Looking for sessions…');
+  setIcon(createButton, 'download', 'Select a session to import');
   try {
     const result = await api.discoverTmuxSessions(kind, host);
     if (generation !== discoveryGeneration) return;
@@ -2183,7 +2351,8 @@ discoverButton.addEventListener('click', async () => {
       name.textContent = session.name;
       const details = document.createElement('span');
       details.className = 'session-meta';
-      details.textContent = `${session.windows} window${session.windows === 1 ? '' : 's'}${session.attached ? ` · ${session.attached} attached` : ''}`;
+      details.innerHTML = icon('terminal') + session.windows + (session.attached ? ' · ' + icon('globe') + session.attached : '');
+      details.title = `${session.windows} windows · ${session.attached} attached clients`;
       option.append(name, details);
       option.onclick = () => {
         for (const node of discoveryEl.querySelectorAll('.discovered-session')) {
@@ -2194,7 +2363,7 @@ discoverButton.addEventListener('click', async () => {
         option.setAttribute('aria-selected', 'true');
         selectedDiscovered = session;
         if (!titleInput.value.trim()) titleInput.value = session.name;
-        createButton.textContent = 'Import';
+        setIcon(createButton, 'download', 'Import session');
       };
       discoveryEl.appendChild(option);
     }
@@ -2204,7 +2373,7 @@ discoverButton.addEventListener('click', async () => {
   } finally {
     if (generation !== discoveryGeneration) return;
     discoverButton.disabled = false;
-    discoverButton.textContent = 'Refresh existing sessions';
+    setIcon(discoverButton, 'refresh', 'Refresh existing sessions');
   }
 });
 
@@ -2213,12 +2382,16 @@ sessionForm.addEventListener('submit', async (event) => {
   // form method=dialog closes automatically; only act on OK
   const ok = e.submitter instanceof HTMLButtonElement && e.submitter.value === 'ok';
   if (!ok) return;
+  if (createButton.disabled) { e.preventDefault(); return; }
   const kind = fKind.value === 'local' ? 'local' : 'remote';
   const host = fHost.value.trim();
   if (kind === 'remote' && !host) {   // guard: remote needs a host
     e.preventDefault();               // keep the dialog open
     errorEl.textContent = 'Enter a host (user@host).';
     return;
+  }
+  if (importMode && !selectedDiscovered) {
+    e.preventDefault(); errorEl.textContent = 'Find and select a session to import.'; return;
   }
   // A submit event does not await an async listener. Prevent the method=dialog default close now,
   // then close explicitly only after Rust confirms creation; failures remain visible and retryable.
@@ -2242,12 +2415,15 @@ sessionForm.addEventListener('submit', async (event) => {
     if (discoveredTmuxVersion) meta.tmuxVersion = discoveredTmuxVersion;
   }
   let res;
+  createButton.disabled = true;
   try {
     res = await api.createSession(meta);
   } catch (err) {
     const message = errorMessage(err) || 'unknown error';
     errorEl.textContent = 'Could not create session: ' + message;
     return;
+  } finally {
+    createButton.disabled = false;
   }
   const { id, session } = res;
   const viewMeta: SessionMeta = { ...meta, id, session };
@@ -2273,6 +2449,9 @@ async function init(reset = false): Promise<void> {
     for (const id of Object.keys(pendingData)) delete pendingData[id];
     tabsEl.className = '';
     tabsEl.innerHTML = '';
+    historyOpen = false; portPending.clear(); portErrors.clear();
+    document.querySelectorAll<HTMLDialogElement>('.action-dialog').forEach(d => d.close());
+    requiredElement('app').classList.remove('sidebar-collapsed');
     if (dialog.open) dialog.close();
     sessionForm.reset();
     errorEl.textContent = '';
@@ -2299,6 +2478,7 @@ async function init(reset = false): Promise<void> {
     const v = makeView({ ...meta, kind: meta.transport === 'local' ? 'local' : 'remote' });
     v.started = false;   // not connected yet; mount() will start (reattach) on click
   }
+  if (persisted.length && persisted.every(meta => meta.archived)) historyOpen = true;
   renderSidebar();
   // §18: show persisted forwarded ports for every restored session up front (greyed until
   // re-opened), so the list survives an app restart without waiting for a connect.

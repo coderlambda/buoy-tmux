@@ -25,76 +25,22 @@ describe('Tauri UI: new session dialog', () => {
     await loadFixture(baseSessions());
   });
 
-  it('keeps the native select themed and functional', async () => {
+  it('uses accessible icon controls for connection type', async () => {
     const { check, finish } = createChecks();
     await openDialog();
-
-    const state = await js(`(() => {
-      const select = document.getElementById('f-kind');
-      const input = document.getElementById('f-host');
-      const wrap = select.closest('.dialog-select');
-      const selectStyle = getComputedStyle(select);
-      const inputStyle = getComputedStyle(input);
-      const arrowStyle = getComputedStyle(wrap, '::after');
-      return {
-        open: document.getElementById('dialog').open,
-        appearance: selectStyle.appearance || selectStyle.webkitAppearance,
-        selectHeight: select.getBoundingClientRect().height,
-        inputHeight: input.getBoundingClientRect().height,
-        backgroundMatches: selectStyle.backgroundColor === inputStyle.backgroundColor,
-        borderMatches: selectStyle.borderColor === inputStyle.borderColor,
-        selectFocused: select.matches(':focus'),
-        focusBorderMatches: selectStyle.borderColor === arrowStyle.borderRightColor,
-        radiusMatches: selectStyle.borderRadius === inputStyle.borderRadius,
-        fontMatches: selectStyle.fontFamily === inputStyle.fontFamily
-          && selectStyle.fontSize === inputStyle.fontSize,
-        selectSurface: {
-          background: selectStyle.backgroundColor,
-          border: selectStyle.borderColor,
-          radius: selectStyle.borderRadius,
-          fontFamily: selectStyle.fontFamily,
-          fontSize: selectStyle.fontSize,
-        },
-        inputSurface: {
-          background: inputStyle.backgroundColor,
-          border: inputStyle.borderColor,
-          radius: inputStyle.borderRadius,
-          fontFamily: inputStyle.fontFamily,
-          fontSize: inputStyle.fontSize,
-        },
-        arrow: arrowStyle.content !== 'none' && arrowStyle.pointerEvents === 'none',
-      };
-    })()`);
-
-    check(state.open, 'TC-NS1 New session dialog opens');
-    check(state.appearance === 'none',
-      `TC-NS1 Type field removes native select chrome (got ${state.appearance})`);
-    check(Math.abs(state.selectHeight - state.inputHeight) < 0.5,
-      `TC-NS1 Type and Host fields have the same height (${state.selectHeight}px / ${state.inputHeight}px)`);
-    check(state.backgroundMatches && state.radiusMatches && state.fontMatches
-      && (state.borderMatches || (state.selectFocused && state.focusBorderMatches)),
-    `TC-NS1 Type field matches text inputs and keeps its focused accent border (${JSON.stringify({ select: state.selectSurface, input: state.inputSurface, selectFocused: state.selectFocused })})`);
-    check(state.arrow, 'TC-NS1 Type field shows a non-interactive theme chevron');
-
-    if (process.env.BUOY_GUI_SCREENSHOT) {
-      await browser.pause(100);
-      await screenshotIfRequested(null);
-    }
-
-    const behavior = await js(`(() => {
-      const select = document.getElementById('f-kind');
-      select.value = 'local';
-      select.dispatchEvent(new Event('change', { bubbles: true }));
-      return {
-        remoteHidden: getComputedStyle(document.getElementById('remote-fields')).display === 'none',
-        localShown: getComputedStyle(document.getElementById('local-hint')).display !== 'none',
-      };
-    })()`);
-    check(behavior.remoteHidden && behavior.localShown,
-      'TC-NS1 styled native select still switches the form to a local session');
-
-    const errors = await js('window.__errs || []');
-    check(errors.length === 0, `TC-NS1 no renderer errors (got ${JSON.stringify(errors)})`);
+    const controls = await js(`['f-remote','f-local','f-ok'].map(id => {
+      const el = document.getElementById(id); return { icon: !!el.querySelector('svg'), label: el.getAttribute('aria-label'), text: el.textContent.trim() };
+    })`);
+    check(controls.every((c: { icon: boolean; label: string; text: string }) => c.icon && c.label && !c.text),
+      'TC-NS1 type and submit controls have visible icons and accessible labels');
+    await $('#f-local').click();
+    const state = await js(`({ kind: document.getElementById('f-kind').value,
+      hostHidden: getComputedStyle(document.getElementById('remote-fields')).display === 'none',
+      local: document.getElementById('f-local').getAttribute('aria-pressed') })`);
+    check(state.kind === 'local' && state.hostHidden && state.local === 'true', 'TC-NS1 Local changes the form and selected state');
+    await $('#f-remote').click();
+    check(await js(`document.getElementById('f-kind').value`) === 'remote', 'TC-NS1 SSH restores the remote form');
+    if (process.env.BUOY_GUI_SCREENSHOT) await screenshotIfRequested(null);
     finish();
   });
 
@@ -251,7 +197,7 @@ describe('Tauri UI: new session dialog', () => {
         tabsVisible: document.getElementById('tabs').classList.contains('on'),
         terminalMounted: !!document.querySelector('#term .xterm'),
       }; })()`);
-    check(ui.title === 'local' && ui.sub === 'local shell',
+    check(ui.title === 'local' && ui.sub.startsWith('Local'),
       `TC-NS6 backend bare-pty downgrade renders as a local shell (got ${JSON.stringify(ui)})`);
     check(!ui.tabsVisible && ui.terminalMounted,
       'TC-NS6 bare local mode mounts one terminal without a tab strip');
@@ -280,19 +226,20 @@ describe('Tauri UI: new session dialog', () => {
     });
     await openDialog();
     await js(`document.getElementById('f-host').value = 'dev@example.test'`);
-    await js(`document.getElementById('f-discover').click()`);
+    await $('#f-import-mode').click();
+    await $('#f-discover').click();
     await browser.waitUntil(async () => js(
       `document.querySelectorAll('#tmux-discovery .discovered-session').length === 2`));
 
     const discovered = await js(`Array.from(document.querySelectorAll(
-      '#tmux-discovery .discovered-session')).map((node) => node.textContent)`);
+      '#tmux-discovery .discovered-session')).map((node) => node.querySelector('.session-name').textContent + ' ' + node.querySelector('.session-meta').title)`);
     check(discovered.length === 2 && !discovered.some((text: string) => text.includes('existing'))
       && discovered[0].includes('work') && discovered[0].includes('3 windows')
       && discovered[0].includes('1 attached'),
     `TC-NS7 discovery skips already-open sessions and shows the remaining topology (got ${JSON.stringify(discovered)})`);
 
     await js(`document.querySelector('#tmux-discovery .discovered-session').click()`);
-    check(await js(`document.getElementById('f-ok').textContent`) === 'Import',
+    check(await js(`document.getElementById('f-ok').getAttribute('aria-label')`) === 'Import session',
       'TC-NS7 selecting an existing session changes the primary action to Import');
     await submitCreate();
     await browser.waitUntil(async () => js(
@@ -334,18 +281,19 @@ describe('Tauri UI: new session dialog', () => {
     });
     await openDialog();
     await js(`document.getElementById('f-host').value = 'dev@example.test'`);
-    await js(`document.getElementById('f-discover').click()`);
+    await $('#f-import-mode').click();
+    await $('#f-discover').click();
     await browser.waitUntil(async () => js(
       `document.getElementById('tmux-discovery').textContent.includes('already open')`));
 
     const state = await js(`({
       options: document.querySelectorAll('#tmux-discovery .discovered-session').length,
       message: document.getElementById('tmux-discovery').textContent,
-      action: document.getElementById('f-ok').textContent,
+      action: document.getElementById('f-ok').getAttribute('aria-label'),
     })`);
     check(state.options === 0
       && state.message === 'No new sessions to import. All discovered sessions are already open.'
-      && state.action === 'Create',
+      && state.action === 'Select a session to import',
     `TC-NS8 all-open discovery has no import choices (got ${JSON.stringify(state)})`);
     finish();
   });

@@ -42,6 +42,7 @@ interface TestFixture {
 }
 
 interface CommandArgs {
+  remote?: number;
   meta?: CreateResult;
   id?: string;
   data?: string;
@@ -236,7 +237,21 @@ interface Window {
       case 'save_file':
       case 'enable_html_scripts':
       case 'open_forwarded_url':
-      case 'force_forward': return {};
+        return {};
+      case 'force_forward': {
+        const tunnels = backend.tunnels?.[args.id ?? ''] ?? [];
+        const target = tunnels.find(t => (t as { remote: number }).remote === args.remote);
+        if (target && typeof target === 'object') Object.assign(target, { local: args.remote, active: true });
+        emit('session:tunnels', { id: args.id, tunnels: clone(tunnels) });
+        return { ok: true, local: args.remote };
+      }
+      case 'close_tunnel': {
+        const tunnels = backend.tunnels?.[args.id ?? ''] ?? [];
+        const next = tunnels.filter(t => (t as { remote: number }).remote !== args.remote);
+        if (backend.tunnels && args.id) backend.tunnels[args.id] = next;
+        emit('session:tunnels', { id: args.id, tunnels: clone(next) });
+        return null;
+      }
       default: return null;
     }
   }

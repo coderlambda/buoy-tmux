@@ -22,19 +22,13 @@ describe('Tauri UI: terminal notification dots', () => {
     return js(`(() => ({
       sessionS1: document.querySelectorAll('#sessions .session[data-id="s1"] .notification-dot').length,
       sessionS2: document.querySelectorAll('#sessions .session[data-id="s2"] .notification-dot').length,
-      sessionDotInStatusColumn: (() => {
+      sessionDotInTitle: (() => {
         const row = document.querySelector('#sessions .session[data-id="s1"]');
-        const stack = row && row.querySelector('.status-dots');
         const notice = row && row.querySelector('.notification-dot');
-        const connection = stack && stack.querySelector('.dot');
-        if (!(stack && notice && connection && notice.parentElement === stack
-          && stack.firstElementChild === connection)) return false;
-        const noticeBox = notice.getBoundingClientRect();
-        const connectionBox = connection.getBoundingClientRect();
-        const noticeCenter = noticeBox.left + noticeBox.width / 2;
-        const connectionCenter = connectionBox.left + connectionBox.width / 2;
-        return Math.abs(noticeCenter - connectionCenter) <= 0.5
-          && noticeBox.top >= connectionBox.bottom + 4;
+        const name = row && row.querySelector('.name');
+        if (!(notice && name && notice.closest('.name-row'))) return false;
+        const n = notice.getBoundingClientRect(), t = name.getBoundingClientRect();
+        return n.left >= t.right && Math.abs((n.top + n.height / 2) - (t.top + t.height / 2)) < 2;
       })(),
       tabDots: Array.from(document.querySelectorAll('#tabs .tab:not(.plus)')).filter(
         (tab) => tab.querySelector('.notification-dot')).map(
@@ -114,8 +108,8 @@ describe('Tauri UI: terminal notification dots', () => {
   state = await dotState();
   check(state.sessionS1 === 1 && JSON.stringify(state.tabDots) === JSON.stringify(['agent']),
     `TC-N2 completed OSC marks only agent + its session (got ${JSON.stringify(state)})`);
-  check(state.sessionDotInStatusColumn,
-    'TC-N2 session notification dot sits below the connection status dot');
+  check(state.sessionDotInTitle,
+    'TC-N2 session notification dot sits beside the workspace title');
   await snapshot('osc-notifications-unread.png');
 
   // A backend active-window report changes what is displayed but is not a user acknowledgement.
