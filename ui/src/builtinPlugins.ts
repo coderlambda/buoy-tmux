@@ -104,7 +104,7 @@ export function stripOsc8Sequences(data: string): string {
 
 // Claude Code can leave dotted-underline cells in tmux's history. They are easy to miss while the
 // live TUI is repainting, but `capture-pane -e` serializes them as SGR 4:4 and a reconnect makes the
-// dots permanently visible beneath restored text. Disable only that underline variant in snapshots;
+// dots permanently visible beneath restored text. Disable dotted and dashed (SGR 4:5) variants in snapshots;
 // preserve every other SGR parameter, including ordinary underline styles and color attributes.
 const SGR_RE = /\x1b\[([0-9:;]*)m/g;
 
@@ -130,7 +130,7 @@ export function sanitizeReconnectSnapshot(data: string): string {
     const parts = params.split(';');
     let changed = false;
     for (let i = 0; i < parts.length; i++) {
-      if (parts[i] === '4:4') {
+      if (parts[i] === '4:4' || parts[i] === '4:5') {
         parts[i] = '24'; // SGR 24: explicitly clear underline so prior terminal state cannot leak in
         changed = true;
       }

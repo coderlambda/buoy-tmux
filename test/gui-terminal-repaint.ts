@@ -63,7 +63,7 @@ describe('Tauri UI: terminal reconnect repaint', () => {
     check(state.line === '$ echo MARK' && !state.next.includes('echo MARK'),
       `TC-CR3 command echo remains beside prompt, not on following row (got ${JSON.stringify(state)})`);
 
-    // tmux capture-pane -e includes OSC 8 link wrappers. Live OSC 8 remains native and underlined,
+    // tmux capture-pane -e includes OSC 8 link wrappers. Live OSC 8 stays clickable without decoration,
     // while the same bytes tagged as a reconnect snapshot keep their text/path but lose xterm's
     // persistent dotted/dashed hyperlink cell decoration.
     const E = '\x1b';
@@ -71,8 +71,8 @@ describe('Tauri UI: terminal reconnect repaint', () => {
       + label + E + ']8;;' + E + '\\';
     await fire('data', { id: 's1', window: '@0', data: '\r\n' + osc8('live-link.txt') });
     await browser.pause(100);
-    check(await js(`window.__testTextIsUnderlined('live-link.txt')`) === true,
-      'TC-CR4 live OSC 8 links retain xterm native hyperlink decoration');
+    check(await js(`window.__testTextIsUnderlined('live-link.txt')`) === false,
+      'TC-CR4 live OSC 8 links have no permanent dashed underline');
 
     await fire('data', {
       id: 's1', window: '@0', repaint: true,
@@ -94,8 +94,8 @@ describe('Tauri UI: terminal reconnect repaint', () => {
       data: E + '[H' + E + '[2J' + E + '[4:4mLIVE_DOTTED' + E + '[0m',
     });
     await browser.pause(100);
-    check(await js(`window.__testTextIsUnderlined('LIVE_DOTTED')`) === true,
-      'TC-CR5 live SGR 4:4 retains its explicit dotted underline');
+    check(await js(`window.__testTextIsUnderlined('LIVE_DOTTED')`) === false,
+      'TC-CR5 live SGR 4:4 removes dotted underline');
 
     await fire('data', {
       id: 's1', window: '@0', repaint: true,
@@ -108,6 +108,37 @@ describe('Tauri UI: terminal reconnect repaint', () => {
     })`);
     check(restoredStyle.buffer.includes('RESTORED_TEXT') && restoredStyle.underlined === false,
       `TC-CR5 reconnect history removes tmux SGR 4:4 dots (got ${JSON.stringify(restoredStyle)})`);
+
+    // Let xterm parse fragmented sequences itself: transport chunks may split anywhere inside
+    // CSI/OSC and URL labels must still reach the native OSC 8 handler.
+    await fire('data', { id: 's1', window: '@0', data: E + '[H' + E + '[2J' });
+    const fragments = E + '[4mSOLID' + E + '[24m\r\n'
+      + E + '[4:3mCURLY' + E + '[0m\r\n'
+      + E + '[1;4:5;34mDASHED' + E + '[0m\r\n'
+      + E + ']8;;https://example.com/buoy' + E + '\\' + 'OPEN_DOCS' + E + ']8;;' + E + '\\';
+    // One-character chunks cover every boundary without duplicating terminal parser logic.
+    await js(`(() => {
+      for (const data of ${JSON.stringify(fragments)}) window.__fire('data', {id:'s1',window:'@0',data});
+    })()`);
+    await browser.pause(100);
+    check(await js(`window.__testTextIsUnderlined('SOLID')`) === true, 'ordinary underline remains');
+    check(await js(`window.__testTextIsUnderlined('CURLY')`) === true, 'curly underline remains');
+    check(await js(`window.__testTextIsUnderlined('DASHED')`) === false, 'fragmented SGR 4:5 has no dashed underline');
+    check(await js(`window.__testTextIsUnderlined('OPEN_DOCS')`) === false, 'fragmented OSC 8 has no dashed underline');
+    const point = await js(`(() => {
+      const cell = window.__testFindText('OPEN_DOCS');
+      const screen = document.querySelector('#term .xterm-screen').getBoundingClientRect();
+      const size = window.__testTerminalState();
+      return {x:Math.round(screen.left+(cell.x+2)*screen.width/size.cols),
+              y:Math.round(screen.top+(cell.y+0.5)*screen.height/size.rows)};
+    })()`);
+    await browser.action('pointer').move({ x: point.x, y: point.y, origin: 'viewport' }).perform();
+    await browser.pause(150);
+    await browser.action('pointer').move({ x: point.x, y: point.y, origin: 'viewport' })
+      .down({ button: 0 }).up({ button: 0 }).perform();
+    await browser.pause(100);
+    check(await js(`window.__invocations.some(([name,args]) => name === 'open_external' && args.url === 'https://example.com/buoy')`),
+      'native OSC 8 label still opens its original URL on click');
 
     // A reconnect capture is a new terminal-state baseline, not merely more output. A TUI may
     // leave dotted SGR, origin mode, horizontal margins, or autowrap state active immediately

@@ -209,8 +209,8 @@ test('TC-PL4g2 stripOsc8Sequences removes hyperlink wrappers only', () => {
 });
 
 // TC-PL4g3: tmux capture-pane -e serializes dotted underline cells as SGR 4:4. Reconnect
-// normalization clears that one style without flattening the rest of the captured formatting.
-test('TC-PL4g3 sanitizeReconnectSnapshot clears only dotted underline', () => {
+// normalization clears dotted/dashed styles without flattening the rest of the captured formatting.
+test('TC-PL4g3 sanitizeReconnectSnapshot clears dotted and dashed underline', () => {
   const E = '\x1b';
   const prefix = E + ']8;;' + E + '\\' + E + '[0m' + E + '[?6l' + E + '[?69l'
     + E + '[r' + E + '[?7h' + E + '[?45l' + E + '[4l';
@@ -225,6 +225,7 @@ test('TC-PL4g3 sanitizeReconnectSnapshot clears only dotted underline', () => {
     body(E + '[4:4mdotted' + E + '[0m'),
     E + '[24mdotted' + E + '[0m',
   );
+  assert.equal(body(E + '[1;4:5;34mdashed' + E + '[0m'), E + '[1;24;34mdashed' + E + '[0m');
   assert.equal(
     body(E + '[2;4:4;38:2::10:20:30mstyled' + E + '[0m'),
     E + '[2;24;38:2::10:20:30mstyled' + E + '[0m',

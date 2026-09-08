@@ -3,7 +3,7 @@ import {
   RefreshCw, Keyboard, Ellipsis, Terminal, FileText, Globe, Laptop, ArrowRight,
   ArrowLeft, ArrowUp, ArrowDown, Download, Copy, Code, Info, Pencil, Unplug,
   Power, Trash2, RotateCcw, ChevronDown, ChevronUp, Search, Check, CircleAlert,
-  ArrowRightLeft, Palette, LoaderCircle,
+  ArrowRightLeft, Palette, LoaderCircle, Sun, Moon, Monitor,
 } from 'lucide';
 
 const icons = {
@@ -14,7 +14,7 @@ const icons = {
   copy: Copy, code: Code, info: Info, rename: Pencil, detach: Unplug, end: Power,
   delete: Trash2, restore: RotateCcw, expand: ChevronDown, fold: ChevronUp,
   search: Search, check: Check, error: CircleAlert, ports: ArrowRightLeft,
-  palette: Palette, loading: LoaderCircle,
+  palette: Palette, loading: LoaderCircle, sun: Sun, moon: Moon, monitor: Monitor,
 };
 export type IconName = keyof typeof icons;
 

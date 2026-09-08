@@ -117,6 +117,7 @@ export interface WindowEvent {
 }
 
 export interface TerminalAPI {
+  setTheme(theme: 'dark' | 'light' | null): Promise<void>;
   listSessions(): Promise<SessionMeta[]>;
   discoverTmuxSessions(kind: SessionKind, host: string): Promise<TmuxDiscoveryResult>;
   createSession(meta: CreateSessionMeta): Promise<CreateSessionResult>;

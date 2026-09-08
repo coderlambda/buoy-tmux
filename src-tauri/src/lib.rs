@@ -1163,6 +1163,12 @@ async fn force_forward(app: AppHandle, id: String, remote: u16) -> Result<serde_
     }).await.map_err(|error| error.to_string())?
 }
 
+// Keep native titlebar/controls consistent with the user-selected app appearance.
+#[tauri::command]
+fn set_theme(window: tauri::Window, theme: Option<tauri::Theme>) -> Result<(), String> {
+    window.set_theme(theme).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let store = SessionStore::new(user_data_dir().join("sessions.json"));
@@ -1235,7 +1241,7 @@ pub fn run() {
             tab_new, tab_select, tab_close, tab_capture, tab_rename, open_external, ui_log,
             read_remote_file, save_file, enable_html_scripts, session_retry, session_force_reconnect,
             open_forwarded_url, get_config, list_tunnels, close_tunnel, force_forward,
-            list_hosts, remember_host, check_open_sessions
+            list_hosts, remember_host, check_open_sessions, set_theme
         ])
         // Tunnels are deliberately NOT killed on exit — they keep forwarding, and the next launch
         // ADOPTS the still-alive ones (reuse across restarts). Dead orphans are cleared on load;

@@ -58,7 +58,10 @@ interface XtermTerminal {
 interface XtermTerminalOptions {
   fontFamily?: string;
   fontSize?: number;
-  theme?: { background?: string; foreground?: string; cursor?: string; cursorAccent?: string; green?: string };
+  theme?: { background?: string; foreground?: string; cursor?: string; cursorAccent?: string; green?: string; selectionBackground?: string;
+    black?: string; red?: string; yellow?: string; blue?: string; magenta?: string; cyan?: string; white?: string;
+    brightBlack?: string; brightRed?: string; brightGreen?: string; brightYellow?: string;
+    brightBlue?: string; brightMagenta?: string; brightCyan?: string; brightWhite?: string };
   scrollback?: number;
   linkHandler?: unknown;
 }
@@ -136,6 +139,7 @@ interface Window {
   __testSendInput(data: string): void;
   __testInputLatency(): number | null;
   __testTerminalState(): {
+    theme?: XtermTerminalOptions['theme'];
     cols: number;
     rows: number;
     cursorX: number;

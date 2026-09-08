@@ -1,3 +1,5 @@
+import { initializeTheme, getThemePreference, setThemePreference, onThemeChange } from './theme.js';
+import type { ThemePreference } from './theme.js';
 
 // Renderer: sidebar + one xterm view, wired to the main process over window.terminalAPI.
 // The terminal engine (xterm.js) is deliberately kept behind a thin usage so the transport
@@ -28,6 +30,8 @@ import type {
   TuiActivityTracker,
   TunnelInfo,
 } from './types.js';
+
+initializeTheme();
 
 const DTPlugins = { PluginRegistry };
 const DTTerminalTab = { createTerminalTab };
@@ -173,6 +177,33 @@ requiredElement('collapse-sidebar').onclick = toggleSidebar;
 requiredElement('restore-sidebar').onclick = toggleSidebar;
 requiredElement('show-history').onclick = () => showHistory(!historyOpen);
 requiredElement('history-back').onclick = () => showHistory(false);
+
+const themeButton = requiredElement<HTMLButtonElement>('show-theme');
+const themeChoices: Array<[ThemePreference, IconName, string]> = [
+  ['dark', 'moon', 'Dark'], ['light', 'sun', 'Light'], ['system', 'monitor', 'System'],
+];
+function updateThemeControl(): void {
+  const selected = themeChoices.find(([value]) => value === getThemePreference())!;
+  setIcon(themeButton, selected[1], 'Theme · ' + selected[2]);
+  // Let the native window follow the OS in System mode; forcing the resolved color would
+  // also force matchMedia in WebKit and prevent future system appearance changes.
+  void api.setTheme(selected[0] === 'system' ? null : selected[0]).catch(error => api.log('theme: ' + String(error)));
+}
+updateThemeControl();
+onThemeChange(updateThemeControl);
+themeButton.onclick = () => {
+  const panel = openPanel('Theme');
+  panel.dialog.classList.add('theme-dialog');
+  const choices = document.createElement('div');
+  choices.className = 'action-grid';
+  for (const [value, name, label] of themeChoices) {
+    const button = iconButton(name, label, () => { setThemePreference(value); panel.dialog.close(); });
+    button.dataset.themeChoice = value;
+    button.setAttribute('aria-pressed', String(value === getThemePreference()));
+    choices.append(button);
+  }
+  panel.content.append(choices);
+};
 
 function trackCommandInput(tab: AppTab | null, data: string): void {
   if (!tab || !data) return;
@@ -675,7 +706,7 @@ function makeLinkProvider(
       callback(links);
     },
   };
-  // §21: OSC 8 hyperlinks (`\e]8;;URI\e\\text\e]8;;\e\\`) are underlined natively by xterm, but the
+  // §21: OSC 8 hyperlinks (`\e]8;;URI\e\\text\e]8;;\e\\`) retain their native URL targets, but the
   // click does NOTHING unless a linkHandler is set (default is null -> a blocked window.open in the
   // Tauri webview). Claude Code (and others) emit these for file-path tool calls with the ABSOLUTE
   // remote path as a file:// URI (display text is the short relative path). Route by scheme:
@@ -1941,6 +1972,7 @@ window.__testTerminalState = () => {
     return line ? line.translateToString(true) : '';
   };
   return {
+    theme: term.options?.theme,
     cols: term.cols, rows: term.rows,
     cursorX: buf.cursorX, cursorY: buf.cursorY, baseY: buf.baseY,
     line: textAt(absoluteY), previous: textAt(absoluteY - 1), next: textAt(absoluteY + 1),

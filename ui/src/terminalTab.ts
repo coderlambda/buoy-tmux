@@ -1,3 +1,4 @@
+import { terminalTheme, onThemeChange } from './theme.js';
 
 // Built-in 'terminal' tab-kind (§14/§15). Wraps an xterm.js terminal as a polymorphic
 // TabContent so the project/tab machinery can host it generically alongside future tab kinds
@@ -36,20 +37,18 @@ export function armTerminalInputLatency(): void {
 export function getTerminalInputLatency(): number | null { return inputLatencyResult; }
 
 export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext) {
-  const appearance = window.matchMedia('(prefers-color-scheme: light)');
-  const theme = () => appearance.matches
-    ? { background: '#eff1f5', foreground: '#4c4f69', cursor: '#1e66f5', cursorAccent: '#eff1f5', green: '#2a7533' }
-    : { background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#89b4fa', cursorAccent: '#1e1e2e', green: '#a6e3a1' };
   const options: XtermTerminalOptions = {
     fontFamily: 'Menlo, Consolas, monospace', fontSize: 12,
-    theme: theme(), scrollback: 5000,
-    // §21: handle OSC 8 hyperlinks (embedded-URI links). Without this xterm renders them
-    // underlined but the click is a no-op in the Tauri webview.
+    theme: terminalTheme(), scrollback: 5000,
+    // §21: activate native OSC 8 hyperlinks in the Tauri webview. Our vendored xterm
+    // suppresses persistent dotted/dashed decoration while preserving link IDs and hover.
   };
   if (spec.linkHandler) options.linkHandler = spec.linkHandler;
   const term = new Terminal(options);
-  const updateTheme = () => { if (term.options) term.options.theme = theme(); };
-  appearance.addEventListener('change', updateTheme);
+  const unsubscribeTheme = onThemeChange(() => {
+    if (term.options) term.options.theme = terminalTheme();
+    term.refresh(0, Math.max(0, term.rows - 1));
+  });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   // §13 regex-based URL/path links (our plugin engine).
@@ -174,7 +173,7 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
       return out;
     },
 
-    dispose() { appearance.removeEventListener('change', updateTheme); try { term.dispose(); } catch (_) {} if (el && el.parentNode) el.parentNode.removeChild(el); },
+    dispose() { unsubscribeTheme(); try { term.dispose(); } catch (_) {} if (el && el.parentNode) el.parentNode.removeChild(el); },
   };
 }
 
