@@ -36,14 +36,20 @@ export function armTerminalInputLatency(): void {
 export function getTerminalInputLatency(): number | null { return inputLatencyResult; }
 
 export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext) {
+  const appearance = window.matchMedia('(prefers-color-scheme: light)');
+  const theme = () => appearance.matches
+    ? { background: '#eff1f5', foreground: '#4c4f69', cursor: '#1e66f5', cursorAccent: '#eff1f5', green: '#2a7533' }
+    : { background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#89b4fa', cursorAccent: '#1e1e2e', green: '#a6e3a1' };
   const options: XtermTerminalOptions = {
-    fontFamily: 'Menlo, Consolas, monospace', fontSize: 13,
-    theme: { background: '#1e1e2e', foreground: '#cdd6f4' }, scrollback: 5000,
+    fontFamily: 'Menlo, Consolas, monospace', fontSize: 12,
+    theme: theme(), scrollback: 5000,
     // §21: handle OSC 8 hyperlinks (embedded-URI links). Without this xterm renders them
     // underlined but the click is a no-op in the Tauri webview.
   };
   if (spec.linkHandler) options.linkHandler = spec.linkHandler;
   const term = new Terminal(options);
+  const updateTheme = () => { if (term.options) term.options.theme = theme(); };
+  appearance.addEventListener('change', updateTheme);
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   // §13 regex-based URL/path links (our plugin engine).
@@ -168,7 +174,7 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
       return out;
     },
 
-    dispose() { try { term.dispose(); } catch (_) {} if (el && el.parentNode) el.parentNode.removeChild(el); },
+    dispose() { appearance.removeEventListener('change', updateTheme); try { term.dispose(); } catch (_) {} if (el && el.parentNode) el.parentNode.removeChild(el); },
   };
 }
 

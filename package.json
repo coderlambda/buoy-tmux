@@ -41,5 +41,8 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vite": "^7.1.0"
+  },
+  "dependencies": {
+    "lucide": "0.468.0"
   }
 }
