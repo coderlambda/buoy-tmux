@@ -89,10 +89,9 @@ struct Inner {
     // buffering; otherwise a tab switch during startup/reconnect can replay protocol replies into
     // whichever window happens to be active later.
     pending_input: Vec<(String, Option<String>)>,
-    // A capture is a two-reply transaction (cells, then cursor coordinates). Input for that window
-    // waits until the repaint is emitted, preventing the first typed command from racing between
-    // the snapshot and its cursor query and being echoed on a separate visual row.
-    pending_captures: std::collections::BTreeSet<String>,
+    // Both replies come from one tmux command list. Store the captured cells until the cursor
+    // reply arrives, and hold input for that window until its repaint has been emitted.
+    pending_captures: std::collections::BTreeMap<String, Option<Vec<String>>>,
     pending_output: std::collections::BTreeMap<String, Vec<String>>,
     // Per-pane carry of trailing incomplete UTF-8 bytes. tmux can split a multi-byte char across
     // two %output events for the SAME pane; carrying the partial tail here (keyed by pane, since
@@ -169,7 +168,7 @@ impl ControlBackend {
             ready: false,
             attached: false,
             pending_input: Vec::new(),
-            pending_captures: std::collections::BTreeSet::new(),
+            pending_captures: std::collections::BTreeMap::new(),
             pending_output: std::collections::BTreeMap::new(),
             utf8_carry: std::collections::BTreeMap::new(),
             title_filters: std::collections::BTreeMap::new(),
@@ -321,16 +320,7 @@ impl ControlBackend {
     pub fn capture_window(&self, win: &str) {
         if !is_win_id(win) { return; }
         let mut g = self.inner.lock().unwrap();
-        // One backfill per window at a time. The renderer also guards this, but keeping the
-        // transaction invariant here protects reconnect races and direct command callers.
-        if !g.pending_captures.insert(win.to_string()) { return; }
-        g.send(
-            // Keep physical pane rows physical. `-J` joins wrapped rows and `-N` preserves padding;
-            // replaying that text can reflow to a different height in xterm and separate the prompt
-            // from the cursor even when both terminals have the same dimensions.
-            format!("capture-pane -p -e -q -S -{} -t {}", MAX_HISTORY, win),
-            ReplyKind::Capture { window: Some(win.to_string()) },
-        );
+        g.capture_window(win);
     }
 
     pub fn kill(&self) {
@@ -346,6 +336,23 @@ impl Inner {
         self.reply.expect(kind);
         let _ = self.writer.write_all(line.as_bytes());
         let _ = self.writer.write_all(b"\n");
+        let _ = self.writer.flush();
+    }
+
+    fn capture_window(&mut self, win: &str) {
+        if self.pending_captures.contains_key(win) { return; }
+        self.pending_captures.insert(win.to_string(), None);
+        self.reply.expect(ReplyKind::Capture { window: win.to_string() });
+        self.reply.expect(ReplyKind::CaptureCursor { window: win.to_string() });
+        // One command list executes without returning to tmux's event loop between the screen
+        // and cursor reads. A second round trip lets a new shell print its prompt in between:
+        // we would then erase that prompt with an older empty screen but keep its newer cursor.
+        // Keep physical rows (-J/-N would change wrapping) and exactly two FIFO reply slots.
+        let command = format!(
+            "capture-pane -p -e -q -S -{} -t {} ; display-message -p -t {} '#{{cursor_x}} #{{cursor_y}}'\n",
+            MAX_HISTORY, win, win,
+        );
+        let _ = self.writer.write_all(command.as_bytes());
         let _ = self.writer.flush();
     }
 
@@ -393,33 +400,24 @@ impl Inner {
         }
     }
 
-    /// Consume one reply block. `ok` is false for a tmux `%error` block, whose body is a DIAGNOSTIC
-    /// ("can't find window: @9"), not command output. We must still `take()` the queued kind to keep
-    /// the FIFO aligned with the commands we sent (tmux emits exactly one block per command, error or
-    /// not), but the body must NOT be interpreted: routing an error body to paint_capture used to
-    /// clear-screen the terminal and paint the tmux diagnostic as counterfeit scrollback, and routing
-    /// it to apply_topology would parse it as pane rows.
+    /// Consume one reply block in submission order. A tmux error is a diagnostic, never screen
+    /// content. It also cancels any remaining commands in the same command list.
     fn on_reply(inner: &Arc<Mutex<Inner>>, ok: bool, body: Vec<String>) {
         let kind = { inner.lock().unwrap().reply.take() };
-        let kind_name = match kind.as_ref() {
-            Some(ReplyKind::Ignore) => "ignore",
-            Some(ReplyKind::Topology) => "topology",
-            Some(ReplyKind::Capture { .. }) => "capture",
-            Some(ReplyKind::CaptureCursor { .. }) => "capture-cursor",
-            None => "unexpected",
-        };
-        // Do not Debug-print `kind`: CaptureCursor deliberately carries up to MAX_HISTORY captured
-        // rows while awaiting the coordinate reply, which would flood the opt-in diagnostic log.
-        crate::dlog!("on_reply: kind={} ok={} bodyLines={}", kind_name, ok, body.len());
+        crate::dlog!("on_reply: kind={:?} ok={} bodyLines={}", kind, ok, body.len());
         if !ok {
-            crate::dlog!("on_reply: %error for kind={}, body discarded: {:?}", kind_name, body);
-            let failed_window = match kind.as_ref() {
-                Some(ReplyKind::Capture { window: Some(window) }) => Some(window.clone()),
-                Some(ReplyKind::CaptureCursor { window, .. }) => Some(window.clone()),
-                _ => None,
-            };
-            if let Some(window) = failed_window {
-                inner.lock().unwrap().finish_capture(&window);
+            crate::dlog!("on_reply: %error body discarded: {:?}", body);
+            let mut g = inner.lock().unwrap();
+            match kind {
+                Some(ReplyKind::Capture { window }) => {
+                    // tmux skips the cursor command after a failed capture; it has no reply.
+                    // Remove that slot so subsequent windows/topology stay correlated correctly.
+                    let skipped = g.reply.take();
+                    debug_assert_eq!(skipped, Some(ReplyKind::CaptureCursor { window: window.clone() }));
+                    g.finish_capture(&window);
+                }
+                Some(ReplyKind::CaptureCursor { window }) => g.finish_capture(&window),
+                _ => {}
             }
             return;
         }
@@ -429,10 +427,12 @@ impl Inner {
                 Inner::apply_topology(inner, lines);
             }
             Some(ReplyKind::Capture { window }) => {
-                Inner::request_capture_cursor(inner, window, body);
+                let mut g = inner.lock().unwrap();
+                if let Some(capture) = g.pending_captures.get_mut(&window) { *capture = Some(body); }
             }
-            Some(ReplyKind::CaptureCursor { window, body: capture }) => {
-                if let Some((x, y)) = parse_cursor_position(&body) {
+            Some(ReplyKind::CaptureCursor { window }) => {
+                let capture = inner.lock().unwrap().pending_captures.get_mut(&window).and_then(Option::take);
+                if let (Some(capture), Some((x, y))) = (capture, parse_cursor_position(&body)) {
                     Inner::paint_capture(inner, window, capture, x, y);
                 } else {
                     inner.lock().unwrap().finish_capture(&window);
@@ -629,7 +629,7 @@ impl Inner {
     /// active window. Buffer until ready; an unaddressed item also waits for topology.
     fn write_input(&mut self, data: &str, target: Option<String>) {
         match target.clone().or_else(|| self.reg.active_window.clone()) {
-            Some(t) if self.ready && !self.pending_captures.contains(&t) => {
+            Some(t) if self.ready && !self.pending_captures.contains_key(&t) => {
                 for line in encode_send_keys(data, &t) { self.send(line, ReplyKind::Ignore); }
             }
             _ => {
@@ -649,7 +649,7 @@ impl Inner {
         crate::dlog!("flush_pending_input: {} chunks active={:?}", queued.len(), active);
         for (data, explicit) in queued {
             let target = explicit.clone().or_else(|| active.clone());
-            if let Some(target) = target.filter(|t| !self.pending_captures.contains(t)) {
+            if let Some(target) = target.filter(|t| !self.pending_captures.contains_key(t)) {
                 for line in encode_send_keys(&data, &target) {
                     self.send(line, ReplyKind::Ignore);
                 }
@@ -664,23 +664,6 @@ impl Inner {
     fn finish_capture(&mut self, window: &str) {
         self.pending_captures.remove(window);
         self.flush_pending_input();
-    }
-
-    /// `capture-pane` does not include the pane's cursor position. Query it immediately after the
-    /// capture and carry the captured rows in the reply tag so the two FIFO replies stay paired.
-    fn request_capture_cursor(
-        inner: &Arc<Mutex<Inner>>,
-        window: Option<String>,
-        body: Vec<String>,
-    ) {
-        let mut g = inner.lock().unwrap();
-        let target = window.or_else(|| g.reg.active_window.clone());
-        if let Some(t) = target {
-            g.send(
-                format!("display-message -p -t {} '#{{cursor_x}} #{{cursor_y}}'", t),
-                ReplyKind::CaptureCursor { window: t, body },
-            );
-        }
     }
 
     fn paint_capture(
@@ -912,7 +895,7 @@ mod tests {
             ready: false,
             attached: false,
             pending_input: Vec::new(),
-            pending_captures: std::collections::BTreeSet::new(),
+            pending_captures: std::collections::BTreeMap::new(),
             pending_output: std::collections::BTreeMap::new(),
             utf8_carry: std::collections::BTreeMap::new(),
             title_filters: std::collections::BTreeMap::new(),
@@ -1044,19 +1027,87 @@ mod tests {
     }
 
     #[test]
-    fn tc_cb_capture_queues_cursor_query_with_original_rows() {
+    fn tc_cb_capture_and_cursor_are_submitted_before_any_reply() {
         let (inner, sent) = test_inner();
-        assert_eq!(inner.lock().unwrap().reply.take(), Some(ReplyKind::Ignore));
-        let rows = vec!["input".to_string(), "status".to_string()];
+        inner.lock().unwrap().reply.take(); // handshake
+        inner.lock().unwrap().capture_window("@4");
+        let commands = sent_str(&sent);
+        assert!(commands.contains("capture-pane -p -e -q -S -2000 -t @4 ; display-message -p -t @4 '#{cursor_x} #{cursor_y}'\n"),
+            "cells and cursor must execute in one tmux command list, before a startup prompt can interleave; got {commands:?}");
+        Inner::on_reply(&inner, true, vec![String::new(); 24]);
+        assert_eq!(sent_str(&sent), commands, "the capture reply must not trigger a new cursor round trip");
+    }
 
-        Inner::request_capture_cursor(&inner, Some("@4".into()), rows.clone());
-        assert!(sent_str(&sent).contains(
-            "display-message -p -t @4 '#{cursor_x} #{cursor_y}'"
-        ));
-        assert_eq!(
-            inner.lock().unwrap().reply.take(),
-            Some(ReplyKind::CaptureCursor { window: "@4".into(), body: rows })
-        );
+    #[test]
+    fn tc_cb_empty_capture_keeps_later_prompt_and_releases_input_after_paint() {
+        let events = Arc::new(Mutex::new(Vec::<BackendEvent>::new()));
+        let captured = events.clone();
+        let (inner, sent) = test_inner_with_sink(Arc::new(move |event| captured.lock().unwrap().push(event)));
+        inner.lock().unwrap().reply.take();
+        Inner::apply_topology(&inner, vec!["@0\t%0\t1\t1\tzsh\t/tmp\tzsh".into()]);
+        Inner::mark_ready(&inner);
+        events.lock().unwrap().clear();
+        {
+            let mut g = inner.lock().unwrap();
+            g.capture_window("@0");
+            g.capture_window("@0"); // duplicate requests share the same transaction
+            assert_eq!(g.reply.pending(), 2);
+            g.write_input("x", Some("@0".into()));
+        }
+        Inner::on_reply(&inner, true, vec![String::new(); 24]);
+        assert_eq!(inner.lock().unwrap().pending_input.len(), 1);
+        assert!(events.lock().unwrap().is_empty(), "wait for the matching cursor before painting");
+        Inner::on_reply(&inner, true, vec!["0 0".into()]);
+        assert!(inner.lock().unwrap().pending_input.is_empty());
+        assert!(sent_str(&sent).contains("send-keys -t @0 -l \"x\""));
+        {
+            let mut g = inner.lock().unwrap();
+            g.route_output("%0".into(), "PROMPT > x".into());
+            g.flush_output();
+        }
+        let events = events.lock().unwrap();
+        assert!(matches!(&events[0], BackendEvent::Data { data, repaint: true, .. } if data.ends_with("\x1b[1;1H")));
+        assert!(matches!(&events[1], BackendEvent::Data { data, repaint: false, .. } if data == "PROMPT > x"),
+            "a prompt printed after the atomic snapshot must be the last visible output");
+    }
+
+    #[test]
+    fn tc_cb_failed_capture_skips_cursor_slot_and_preserves_other_windows() {
+        let events = Arc::new(Mutex::new(Vec::<BackendEvent>::new()));
+        let captured = events.clone();
+        let (inner, _) = test_inner_with_sink(Arc::new(move |event| captured.lock().unwrap().push(event)));
+        inner.lock().unwrap().reply.take();
+        {
+            let mut g = inner.lock().unwrap();
+            g.capture_window("@9");
+            g.capture_window("@4");
+        }
+        Inner::on_reply(&inner, false, vec!["can't find window: @9".into()]);
+        assert!(!inner.lock().unwrap().pending_captures.contains_key("@9"));
+        Inner::on_reply(&inner, true, vec!["ready>".into(), String::new()]);
+        Inner::on_reply(&inner, true, vec!["6 0".into()]);
+        assert!(inner.lock().unwrap().pending_captures.is_empty());
+        assert_eq!(inner.lock().unwrap().reply.pending(), 0);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "failed captures cannot erase the terminal with diagnostics");
+        assert!(matches!(&events[0], BackendEvent::Data { window, data, repaint: true }
+            if window == "@4" && data == "\x1b[H\x1b[2Jready>\r\n\x1b[1;7H"));
+    }
+
+    #[test]
+    fn tc_cb_failed_or_invalid_cursor_releases_capture_for_retry() {
+        for ok in [false, true] {
+            let (inner, _) = test_inner();
+            inner.lock().unwrap().reply.take();
+            inner.lock().unwrap().capture_window("@4");
+            Inner::on_reply(&inner, true, vec!["prompt".into()]);
+            Inner::on_reply(&inner, ok, vec!["invalid cursor".into()]);
+            let mut g = inner.lock().unwrap();
+            assert!(g.pending_captures.is_empty());
+            assert_eq!(g.reply.pending(), 0);
+            g.capture_window("@4");
+            assert_eq!(g.reply.pending(), 2, "a failed attempt must not block later captures");
+        }
     }
 
     #[test]
@@ -1099,7 +1150,7 @@ mod tests {
 
         {
             let mut g = inner.lock().unwrap();
-            g.pending_captures.insert("@0".into());
+            g.pending_captures.insert("@0".into(), None);
             g.write_input("echo AFTER_REPAINT\n", Some("@0".into()));
             assert_eq!(g.pending_input.len(), 1, "input is held during capture");
         }

@@ -1,6 +1,7 @@
 //! ReplyChannel: request/response correlation over a tmux control-mode command stream
 //! (DESIGN.md §12). Port of src/main/replyChannel.js. tmux emits exactly one %begin..%end reply
-//! block per command, in submission order, plus one unsolicited handshake block at connect.
+//! block per executed command, in submission order, plus one unsolicited handshake at connect.
+//! An error skips the rest of that command list; the caller removes those unexecuted reply slots.
 //!
 //! In Rust we can't stash arbitrary closures with captured backend state as ergonomically as JS,
 //! so the queue holds a `ReplyKind` tag describing what to do with each reply. The backend
@@ -16,11 +17,10 @@ pub enum ReplyKind {
     Ignore,
     /// A `list-panes` topology listing: reconcile the registry.
     Topology,
-    /// A `capture-pane` scrollback back-fill, painted into the given window (None = active).
-    Capture { window: Option<String> },
-    /// The cursor-position query paired with a completed capture. `capture-pane` returns only
-    /// cells, not the pane cursor; retain the captured rows until this second FIFO reply arrives.
-    CaptureCursor { window: String, body: Vec<String> },
+    /// First reply in the atomic capture/cursor command list.
+    Capture { window: String },
+    /// Second reply in the same command list. The backend holds the first reply until it arrives.
+    CaptureCursor { window: String },
 }
 
 pub struct ReplyChannel {
@@ -70,9 +70,9 @@ mod tests {
     fn tc_rc2_fifo_order() {
         let mut rc = ReplyChannel::new();
         rc.expect(ReplyKind::Topology);
-        rc.expect(ReplyKind::Capture { window: Some("@1".into()) });
+        rc.expect(ReplyKind::Capture { window: "@1".into() });
         assert_eq!(rc.take(), Some(ReplyKind::Topology));
-        assert_eq!(rc.take(), Some(ReplyKind::Capture { window: Some("@1".into()) }));
+        assert_eq!(rc.take(), Some(ReplyKind::Capture { window: "@1".into() }));
         assert_eq!(rc.take(), None);
     }
 
@@ -98,9 +98,9 @@ mod tests {
     fn tc_rc5_fire_and_forget_consumes_slot() {
         let mut rc = ReplyChannel::new();
         rc.expect(ReplyKind::Ignore); // fire-and-forget
-        rc.expect(ReplyKind::Capture { window: None });
+        rc.expect(ReplyKind::Capture { window: "@2".into() });
         assert_eq!(rc.take(), Some(ReplyKind::Ignore));
-        assert_eq!(rc.take(), Some(ReplyKind::Capture { window: None }));
+        assert_eq!(rc.take(), Some(ReplyKind::Capture { window: "@2".into() }));
     }
 
     #[test]

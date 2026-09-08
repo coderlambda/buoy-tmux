@@ -239,6 +239,11 @@ cd src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --n
 ```
 
 - **live_control_mode** — connect, second tab, per-window output isolation, tab re-visit.
+- **live_capture** — an isolated local tmux server prints its first prompt while captures run;
+  every screen/cursor pair stays coherent for new sessions, empty reconnects, and server restart.
+  Failed compound captures cannot misroute later replies. Run with `cargo test --test live_capture`.
+- **gui-blank-session** — empty backfill followed by a first prompt produces actual text pixels
+  without another keystroke or resize, including reconnect and replacement tmux windows.
 - **live_local_tmux TC-LT6** — capture/backfill restores tmux's exact cursor row/column without an
   added newline (the Codex/Claude Code reconnect cursor regression).
 - **gui-terminal-repaint TC-CR1–3** — the real xterm is fitted/resized before backfill, restores the
