@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::validation::{parse_host, validate_session};
 
@@ -40,7 +41,7 @@ pub struct RecoveryWindow {
 // meta.tmuxVersion directly (a snake/camel mismatch here silently dropped the persisted tmux
 // path -> re-probe on every reconnect -> wrong socket -> couldn't reattach existing sessions).
 // `alias` keeps older snake_case store files loadable (migrated to camelCase on next save).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub id: String,
@@ -143,15 +144,21 @@ fn clean_recovery_windows(windows: &[RecoveryWindow]) -> Vec<RecoveryWindow> {
 }
 
 pub struct SessionStore {
+    io: Mutex<()>,
     path: PathBuf,
 }
 
 impl SessionStore {
     pub fn new(path: PathBuf) -> Self {
-        SessionStore { path }
+        SessionStore { path, io: Mutex::new(()) }
     }
 
     pub fn load(&self) -> Vec<SessionMeta> {
+        let _guard = self.io.lock().unwrap();
+        self.load_locked()
+    }
+
+    fn load_locked(&self) -> Vec<SessionMeta> {
         let raw = match std::fs::read_to_string(&self.path) {
             Ok(r) => r,
             Err(_) => return Vec::new(), // missing file => empty
@@ -190,20 +197,26 @@ impl SessionStore {
     /// demonstrably works) and with `false` when an attach starts (so a crash mid-attach leaves the
     /// cache marked unproven and the next create_session re-probes).
     pub fn set_attach_ok(&self, id: &str, ok: bool) {
-        let mut list = self.load();
-        let mut hit = false;
-        for e in list.iter_mut() {
-            if e.id == id && e.attach_ok != ok { e.attach_ok = ok; hit = true; }
-        }
-        if hit { self.save(&list); }
+        self.update_session(id, |session| session.attach_ok = ok);
     }
 
-    pub fn update_session(&self, id: &str, update: impl FnOnce(&mut SessionMeta)) -> bool {
-        let mut list = self.load();
-        let Some(session) = list.iter_mut().find(|session| session.id == id) else { return false };
-        update(session);
-        self.save(&list);
-        true
+    /// One read-modify-write transaction. Background reconnect callbacks and UI preference
+    /// changes share this lock so a stale snapshot cannot overwrite another workspace's changes.
+    pub fn update<T>(&self, edit: impl FnOnce(&mut Vec<SessionMeta>) -> T) -> T {
+        let _guard = self.io.lock().unwrap();
+        let mut list = self.load_locked();
+        let previous = list.clone();
+        let result = edit(&mut list);
+        if list != previous { self.save_locked(&list); }
+        result
+    }
+
+    pub fn update_session(&self, id: &str, edit: impl FnOnce(&mut SessionMeta)) -> bool {
+        self.update(|list| {
+            let Some(session) = list.iter_mut().find(|session| session.id == id) else { return false };
+            edit(session);
+            true
+        })
     }
 
     /// Move one persisted session into or out of History without changing its tmux identity,
@@ -220,18 +233,15 @@ impl SessionStore {
     pub fn set_recovery_windows(&self, id: &str, windows: &[RecoveryWindow]) {
         let clean = clean_recovery_windows(windows);
         if clean.is_empty() { return; }
-        let mut list = self.load();
-        let mut hit = false;
-        for e in list.iter_mut() {
-            if e.id == id && e.recovery_windows != clean {
-                e.recovery_windows = clean.clone();
-                hit = true;
-            }
-        }
-        if hit { self.save(&list); }
+        self.update_session(id, |session| session.recovery_windows = clean);
     }
 
     pub fn save(&self, sessions: &[SessionMeta]) {
+        let _guard = self.io.lock().unwrap();
+        self.save_locked(sessions);
+    }
+
+    fn save_locked(&self, sessions: &[SessionMeta]) {
         if let Some(dir) = self.path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -258,6 +268,30 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_reconnect_and_preference_updates_preserve_every_change() {
+        let path = std::env::temp_dir().join(format!("buoy-store-concurrent-{}.json", std::process::id()));
+        let store = std::sync::Arc::new(SessionStore::new(path.clone()));
+        let session: SessionMeta = serde_json::from_str(r#"{"id":"test","host":"me@host","session":"dt-test"}"#).unwrap();
+        store.save(&[session]);
+        let workers: Vec<_> = (0..24).map(|i| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.update_session("test", |session| {
+                    // Widen the overlap: without a transaction these snapshots lose updates.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    session.tab_colors.insert(format!("@{i}"), "#89b4fa".into());
+                });
+                store.set_attach_ok("test", true);
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+        let saved = store.load();
+        assert_eq!(saved[0].tab_colors.len(), 24);
+        assert!(saved[0].attach_ok);
+        let _ = std::fs::remove_file(path);
+    }
 
     // The persisted tmux path/version must survive load with BOTH camelCase (new) and snake_case
     // (legacy) keys — the mismatch that dropped them caused a re-probe -> wrong socket -> couldn't

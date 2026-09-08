@@ -81,8 +81,9 @@ export interface TmuxDiscoveryResult {
 
 export interface TunnelInfo {
   remote: number;
-  local: number;
+  local: number | null;
   active?: boolean;
+  scheme?: 'http' | 'https';
 }
 
 export interface AppConfig {

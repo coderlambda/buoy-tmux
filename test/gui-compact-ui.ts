@@ -42,11 +42,15 @@ describe('Tauri UI: compact blue workspace', () => {
     await js(`(() => { const b = document.querySelector('${prefix} .tforce'); b.click(); b.click(); })()`);
     await browser.waitUntil(async () => (await calls('force_forward')).length === 1);
     await browser.waitUntil(async () => js(`document.querySelector('${prefix} .tunnel-link').textContent === '3000'`));
-    assert.equal(await js(`document.querySelector('${prefix} .tforce').getAttribute('aria-disabled')`), 'true');
+    assert.equal(await js(`document.querySelector('${prefix} .tforce').getAttribute('aria-disabled')`), 'false');
     assert.equal(await js(`document.querySelectorAll('dialog[open]').length`), 0);
     await $('#sessions .session[data-id="s2"] .topen').click();
-    const opened = await calls('open_external');
-    assert.equal(opened.at(-1)?.[1]?.url, 'http://localhost:58080/');
+    await fire('state', { id: 's2', state: 'connected' });
+    await browser.waitUntil(async () => (await calls('open_forwarded_url')).length === 1);
+    const opened = await calls('open_forwarded_url');
+    assert.equal(opened.at(-1)?.[1]?.id, 's2');
+    assert.equal(opened.at(-1)?.[1]?.url, 'http://localhost:8080/');
+    assert.equal((await calls('open_external')).length, 0);
     assert.equal(await js(`document.querySelector('.session.active').dataset.id`), 's1');
     await $(prefix + ' .tunnel[data-remote="5173"] .tclose').click();
     await browser.waitUntil(async () => js(`document.querySelectorAll('${prefix} .tunnel').length === 1`));
@@ -55,7 +59,7 @@ describe('Tauri UI: compact blue workspace', () => {
     assert.deepEqual(await js('window.__errs'), []);
   });
 
-  it('keeps the previous mapping on conflict and requires reconnect after a dropped connection', async () => {
+  it('keeps the previous mapping on conflict and waits for an in-progress reconnect', async () => {
     await workspace({ force_forward: 'local port 3000 is already in use' });
     await $('.session[data-id="s1"] .tforce').click();
     await browser.waitUntil(async () => js(`!!document.querySelector('.tunnel-error')`));
@@ -65,7 +69,9 @@ describe('Tauri UI: compact blue workspace', () => {
     const before = (await calls('force_forward')).length;
     await $('.session[data-id="s1"] .tforce').click();
     assert.equal((await calls('force_forward')).length, before);
-    assert.match(await $('.session[data-id="s1"] .tunnel-error').getAttribute('title') || '', /Reconnect/);
+    assert.equal(await $('.session[data-id="s1"] .tforce').isEnabled(), false);
+    await fire('state', { id: 's1', state: 'connected' });
+    await browser.waitUntil(async () => (await calls('force_forward')).length === before + 1);
   });
 
   it('confirms terminal destruction and keeps History from resizing hidden terminals', async () => {

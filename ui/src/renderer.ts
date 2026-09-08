@@ -72,6 +72,9 @@ interface View {
   meta: SessionMeta;
   state: SessionState;
   started: boolean;
+  connectionAttempt?: Promise<void>;
+  portConnection?: Promise<void>;
+  portEpoch?: number;
   inputReady: boolean;
   tabs: Map<string, AppTab>;
   activeWindow: string | null;
@@ -79,6 +82,8 @@ interface View {
   tmuxVersion: number[] | undefined;
   tunnels: TunnelInfo[];
   portsExpanded?: boolean;
+  tunnelRevision?: number;
+  tunnelRefresh?: Promise<void>;
   color: string | null;
   savedTabOrder: string[];
   tabOrder?: string[];
@@ -542,13 +547,22 @@ function baseName(p: string): string { return (String(p).split('/').pop() || 'fi
 
 // §18: pull the authoritative forwarded-port status (persisted + live, each probed) into the view
 // and re-render the sidebar. Safe to call on mount, reconnect, or a periodic tick.
+async function readTunnelStatus(v: View): Promise<void> {
+  const revision = v.tunnelRevision || 0;
+  const tunnels = await api.listTunnels(v.meta.id);
+  if (views.get(v.meta.id) === v && (v.tunnelRevision || 0) === revision) v.tunnels = tunnels;
+}
+
 function refreshTunnels(id: string): void {
-  api.listTunnels(id).then((t) => {
-    const v = views.get(id);
-    if (!v) return;
+  const v = views.get(id);
+  if (!v || v.tunnelRefresh) return;
+  const revision = v.tunnelRevision || 0;
+  const request = api.listTunnels(id).then(t => {
+    if (views.get(id) !== v || (v.tunnelRevision || 0) !== revision) return;
     v.tunnels = Array.isArray(t) ? t : [];
     renderSidebar();
-  }).catch(() => {});
+  }).catch(() => {}).finally(() => { if (v.tunnelRefresh === request) delete v.tunnelRefresh; });
+  v.tunnelRefresh = request;
 }
 
 // Generic action-chooser modal: a title + a list of [label, fn] buttons, dismissed on
@@ -720,9 +734,19 @@ async function mount(id: string, userInitiated = false): Promise<void> {
   // §18: pull the forwarded-port status (persisted + live, probed) for this session.
   refreshTunnels(id);
 
-  // Connect the project once (reattaches the SAME tmux session; tmux replays windows -> tabs).
-  if (!v.started) {
+  try { await connectSession(v); } catch (_) { /* connectSession displays the error. */ }
+}
+
+// Shared by card activation and tunnel clicks. Starting a background workspace must not change
+// the selected terminal, and concurrent clicks must share the same backend creation.
+function connectSession(v: View): Promise<void> {
+  if (v.connectionAttempt) return v.connectionAttempt;
+  if (v.started) return Promise.resolve();
+  const id = v.meta.id;
+  const attempt = (async () => {
     v.started = true;
+    v.meta.detached = false;
+    v.state = 'connecting';
     // control mode: 'ready' arrives from the backend once attach settles (it buffers input until
     // then). inputReady here is a DISPLAY flag only — the backend owns the actual gating.
     if (v.meta.mode === 'control') v.inputReady = false;
@@ -752,6 +776,8 @@ async function mount(id: string, userInitiated = false): Promise<void> {
           dbg('mount->createSession mode changed ' + v.meta.mode + ' -> ' + res.mode);
           v.meta.mode = res.mode;
         }
+        if (v.meta.mode !== 'control' && v.state === 'connecting') v.state = 'connected';
+        if (id === activeId) updateConsoleGate();
         renderSidebar();
       }
     } catch (e) {
@@ -762,8 +788,46 @@ async function mount(id: string, userInitiated = false): Promise<void> {
       setStatus(`failed to connect ${v.meta.title || v.meta.host || 'session'}: ${msg}`);
       if (id === activeId) updateConsoleGate();
       renderSidebar();
+      throw e;
     }
-  }
+  })();
+  v.connectionAttempt = attempt;
+  void attempt.finally(() => { if (v.connectionAttempt === attempt) delete v.connectionAttempt; }).catch(() => {});
+  return attempt;
+}
+
+function ensurePortSession(v: View): Promise<void> {
+  if (v.portConnection) return v.portConnection;
+  const epoch = v.portEpoch || 0;
+  const attempt = (async () => {
+    if (v.meta.archived) throw new Error('This workspace has been closed.');
+    // Ready can arrive before create_session returns and installs its backend in AppState.
+    if (v.connectionAttempt) await v.connectionAttempt;
+    if (views.get(v.meta.id) !== v || v.meta.archived || (v.portEpoch || 0) !== epoch) throw new Error('Workspace connection cancelled.');
+    if (!v.started || v.meta.detached || v.state === 'closed') {
+      v.started = false;
+      await connectSession(v);
+    } else if (v.state === 'dead' || (v.state === 'idle' && v.meta.mode === 'control')) {
+      if (!reconnectBusy(v.meta.id)) {
+        markReconnecting(v.meta.id);
+        v.state = 'connecting';
+        v.inputReady = false;
+        try { await api.forceReconnect(v.meta.id); }
+        catch (error) { clearReconnect(v.meta.id); v.state = 'dead'; throw error; }
+      }
+    }
+    const deadline = Date.now() + 30000;
+    while (true) {
+      if (views.get(v.meta.id) !== v || v.meta.archived || v.meta.detached || (v.portEpoch || 0) !== epoch) throw new Error('Workspace connection cancelled.');
+      if (v.state === 'connected' || (v.meta.mode !== 'control' && v.started && v.state === 'idle')) return;
+      if (v.state === 'dead' || v.state === 'closed') throw new Error('Session reconnect failed. Try again when the host is reachable.');
+      if (Date.now() >= deadline) throw new Error('Session reconnect timed out. Try the port again when the host is reachable.');
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  })();
+  v.portConnection = attempt;
+  void attempt.finally(() => { if (v.portConnection === attempt) delete v.portConnection; }).catch(() => {});
+  return attempt;
 }
 
 // Mount (if needed) and reveal the active tab's content; hide the project's other tabs.
@@ -885,13 +949,13 @@ async function runPortAction(id: string, remote: number, action: 'same' | 'open'
   const v = views.get(id), key = `${id}:${remote}`;
   const tunnel = v?.tunnels.find(t => t.remote === remote);
   if (!v || !tunnel || portPending.has(key)) return;
-  if (action === 'same' && tunnel.active && tunnel.local === remote) return;
-  if (action !== 'stop' && (v.meta.detached || v.state === 'dead' || v.state === 'closed' || v.state === 'reconnecting')) {
-    const message = 'Reconnect this workspace to update its forward.';
-    portErrors.set(key, message); renderSidebar(); showToast(message); return;
-  }
+  v.tunnelRevision = (v.tunnelRevision || 0) + 1;
   portPending.add(key); portErrors.delete(key); renderSidebar();
   try {
+    if (action !== 'stop') {
+      await ensurePortSession(v);
+      if (!v.tunnels.some(t => t.remote === remote)) throw new Error('This forward was stopped.');
+    }
     if (action === 'stop') {
       await api.closeTunnel(id, remote);
       v.tunnels = v.tunnels.filter(t => t.remote !== remote);
@@ -899,17 +963,19 @@ async function runPortAction(id: string, remote: number, action: 'same' | 'open'
     } else if (action === 'same') {
       await api.forceForward(id, remote);
       showToast(`Now forwarding :${remote} → :${remote}`);
-    } else if (tunnel.active && tunnel.local) {
-      await api.openExternal(`http://localhost:${tunnel.local}/`);
     } else {
-      await api.openForwardedUrl(id, `http://localhost:${remote}/`);
+      // Sidebar status is a snapshot. Always let the backend verify/repair the forward before
+      // opening the browser, including rows that still look active after a network drop.
+      await api.openForwardedUrl(id, `${tunnel.scheme || 'http'}://localhost:${remote}/`);
     }
-    if (views.get(id) === v) v.tunnels = await api.listTunnels(id);
+    if (views.get(id) === v) await readTunnelStatus(v);
   } catch (error) {
     const message = errorMessage(error);
     portErrors.set(key, message);
+    if (views.get(id) === v) { try { await readTunnelStatus(v); } catch (_) {} }
     setStatus('Could not update port ' + remote + ': ' + message);
   } finally {
+    v.tunnelRevision = (v.tunnelRevision || 0) + 1;
     portPending.delete(key);
     renderSidebar();
   }
@@ -946,9 +1012,8 @@ function renderSidebar() {
     requiredDescendant<HTMLElement>(li, '.workspace-menu').onclick = e => { e.stopPropagation(); showWorkspaceActions(id); };
     li.querySelectorAll<HTMLElement>('.tunnel').forEach(el => {
       const remote = Number(el.dataset.remote), key = `${id}:${remote}`;
-      const same = v.tunnels.some(t => t.remote === remote && t.local === remote && t.active);
       const button = requiredDescendant<HTMLElement>(el, '.tforce');
-      button.setAttribute('aria-disabled', String(same || portPending.has(key)));
+      button.setAttribute('aria-disabled', String(portPending.has(key)));
       el.querySelectorAll<HTMLButtonElement>('button').forEach(b => { b.disabled = portPending.has(key); });
       for (const [selector, action] of [['.tforce', 'same'], ['.topen', 'open'], ['.tunnel-link', 'open'], ['.tclose', 'stop']] as const) {
         requiredDescendant<HTMLElement>(el, selector).onclick = e => { e.stopPropagation(); void runPortAction(id, remote, action); };
@@ -1363,6 +1428,7 @@ function removeView(id: string): void {
 async function detachSession(id: string): Promise<void> {
   const v = views.get(id);
   if (!v) return;
+  v.portEpoch = (v.portEpoch || 0) + 1;
   try {
     await api.detach(id);
   } catch (error) {
@@ -1379,7 +1445,8 @@ async function detachSession(id: string): Promise<void> {
   v.meta.detached = true;
   v.remoteOpen = null;
   v.inputReady = v.meta.mode !== 'control';
-  v.tunnels = [];
+  v.tunnelRevision = (v.tunnelRevision || 0) + 1;
+  v.tunnels = v.tunnels.map(t => ({ ...t, local: null, active: false }));
   v.restoreTab = v.lastTab || null;   // reveal the same tab again on reattach
   if (v.meta.mode !== 'control') ensureTab(v, '@single');
   if (activeId === id) {
@@ -1416,6 +1483,8 @@ async function closeSession(id: string): Promise<void> {
   const label = v.meta.title || v.meta.session;
   const location = v.meta.transport === 'local' ? 'local' : 'remote';
   if (!await confirmAction('End session', `End "${label}" and its ${location} processes? Window directories and last commands will be saved to History.`, 'End session', true)) return;
+
+  v.portEpoch = (v.portEpoch || 0) + 1;
 
   if (!v.started) {
     await mount(id);
@@ -2122,7 +2191,14 @@ async function closeTab(v: View, winId: string): Promise<void> {
   }
   if (v.meta.id === activeId) renderTabs(v);
 }
-api.onIntentionalExit(({ id }) => { setStatus('session closed (detached)'); });
+api.onIntentionalExit(({ id }) => {
+  const v = views.get(id);
+  if (!v) return;
+  v.state = 'closed'; v.inputReady = false;
+  clearReconnect(id);
+  if (id === activeId) { setStatus('session closed (detached)'); updateConsoleGate(); }
+  renderSidebar();
+});
 api.onReady(({ id }) => {
   dbg('onReady id=' + id + ' activeId=' + activeId);
   const v = views.get(id);
@@ -2137,6 +2213,7 @@ api.onTunnels(({ id, tunnels }) => {
   dbg('onTunnels id=' + id + ' tunnels=' + JSON.stringify(tunnels) + ' hasView=' + views.has(id));
   const v = views.get(id);
   if (!v) return;
+  v.tunnelRevision = (v.tunnelRevision || 0) + 1;
   v.tunnels = Array.isArray(tunnels) ? tunnels : [];
   renderSidebar();
 });
