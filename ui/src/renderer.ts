@@ -2118,31 +2118,12 @@ function renderTabs(v: View | null | undefined): void {
     plus.classList.add('tab', 'plus');
     tabsEl.appendChild(plus);
   }
-  tabsEl.append(iconButton('more', 'Tab actions', () => showTabActions(v)));
-
 }
 
 function setTabColor(v: View, wid: string, color: string | null): void {
   if (color) v.tabColors[wid] = color; else delete v.tabColors[wid];
   renderTabs(v);
   api.setTabPrefs(v.meta.id, null, [wid, color || null]).catch(() => {});
-}
-
-function showTabActions(v: View): void {
-  const tab = activeTab(v); if (!tab) return;
-  const wid = tab.winId, panel = openPanel(tab.title || wid);
-  const grid = document.createElement('div'); grid.className = 'action-grid';
-  const add = (name: IconName, label: string, action: () => unknown) => {
-    const button = iconButton(name, label, () => { panel.dialog.close(); return action(); });
-    grid.append(button); return button;
-  };
-  if (isWindowTab(wid)) add('rename', 'Rename tab', () => startTabRename(v, wid));
-  const order = tabDisplayOrder(v), at = order.indexOf(wid);
-  add('back', 'Move tab left', () => reorderTabByIndex(v, at, at - 1)).disabled = at === 0;
-  add('next', 'Move tab right', () => reorderTabByIndex(v, at, at + 1)).disabled = at === order.length - 1;
-  add('x', tab.viewer ? 'Close preview' : 'End window', () => closeTab(v, wid)).classList.add('danger');
-  panel.content.append(grid);
-  appendPalette(panel.content, v.tabColors[wid], color => setTabColor(v, wid, color));
 }
 
 // §20/§24: tab reorder (horizontal), same pointer-drag mechanism as the sidebar — HTML5 DnD is
