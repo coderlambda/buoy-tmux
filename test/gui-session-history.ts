@@ -1,6 +1,59 @@
+import { strict as assert } from 'node:assert';
 import { createChecks, fire, js, loadFixture, session } from './tauri-ui-harness.js';
 
 describe('Tauri UI: durable session lifecycle', () => {
+  it('closes an unopened or detached background session without attaching or selecting it', async () => {
+    for (const detached of [false, true]) {
+      await loadFixture([session(1, 'Current workspace'), { ...session(2, 'Missing remote session'), detached }]);
+      await fire('state', { id: 's1', state: 'connected' });
+      const before = await js(`window.__invocations.filter(([name]) => name === 'create_session').length`);
+      await $('.session[data-id="s2"] .workspace-menu').click();
+      await $('.act.kill').click();
+      await $('[data-confirm="accept"]').click();
+      await browser.waitUntil(async () => js(`!!document.querySelector('#history .session[data-id="s2"]')`));
+      assert.equal(await js(`window.__invocations.filter(([name]) => name === 'create_session').length`), before);
+      assert.equal(await js(`document.querySelector('#sessions .session.active').dataset.id`), 's1');
+      assert.equal(await js(`document.querySelector('#sessions .session[data-id="s2"]') === null`), true);
+      assert.equal(await js(`window.__invocations.some(([name, args]) => name === 'session_close' && args.id === 's2')`), true);
+    }
+  });
+
+  it('removes a failed initial connection through History without another connect attempt', async () => {
+    await loadFixture([session(1, 'Missing remote session')], {}, { reject: { create_session: 'Remote session is gone' } });
+    await $('.workspace-menu').click();
+    await $('.act.kill').click();
+    await $('[data-confirm="accept"]').click();
+    await browser.waitUntil(async () => js(`document.querySelectorAll('#history .session').length === 1`));
+    assert.equal(await js(`window.__invocations.filter(([name]) => name === 'create_session').length`), 1);
+    await $('#history .delete').click();
+    await $('[data-confirm="accept"]').click();
+    await browser.waitUntil(async () => js(`document.querySelectorAll('.session').length === 0`));
+    assert.equal(await js(`window.__BUOY_UI_TEST__.fixture.sessions.length`), 0);
+    assert.deepEqual(await js('window.__errs'), []);
+  });
+
+  it('retains the entry after a close or delete error and allows retry', async () => {
+    await loadFixture([session(1, 'Unreachable host')], {}, { reject: { session_close: 'Permission denied (publickey).' } });
+    await $('.workspace-menu').click();
+    await $('.act.kill').click();
+    await $('[data-confirm="accept"]').click();
+    await browser.waitUntil(async () => js(`document.querySelector('#status').textContent.includes('Permission denied')`));
+    assert.equal(await $$('#sessions .session').length, 1);
+    assert.equal(await $$('#history .session').length, 0);
+    assert.equal(await $('.session-reconnect').isEnabled(), true);
+    await js(`delete window.__BUOY_UI_TEST__.fixture.backend.reject.session_close`);
+    await $('.workspace-menu').click();
+    await $('.act.kill').click();
+    await $('[data-confirm="accept"]').click();
+    await browser.waitUntil(async () => js(`document.querySelectorAll('#history .session').length === 1`));
+    await js(`window.__BUOY_UI_TEST__.fixture.backend.reject.session_kill = 'Could not delete saved entry'`);
+    await $('#history .delete').click();
+    await $('[data-confirm="accept"]').click();
+    await browser.waitUntil(async () => js(`document.querySelector('#status').textContent.includes('could not delete')`));
+    assert.equal(await $$('#history .session').length, 1);
+    assert.deepEqual(await js('window.__errs'), []);
+  });
+
   it('distinguishes Detach from Close and reconstructs a closed session from History', async () => {
     const checks = createChecks();
     await loadFixture([session(1, 'Work session')]);

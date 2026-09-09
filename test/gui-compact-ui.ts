@@ -20,6 +20,24 @@ async function workspace(reject = {}): Promise<void> {
 describe('Tauri UI: compact blue workspace', () => {
   beforeEach(async () => { await browser.setWindowSize(1100, 700); await workspace(); });
 
+  it('blurs disconnected terminal content while keeping the reconnect button clear and usable', async () => {
+    for (const state of ['connecting', 'reconnecting', 'dead', 'closed']) {
+      await fire('state', { id: 's1', state });
+      // The embedded webview can defer its first paint while offscreen. Finish the CSS fade so
+      // this checks the final blur, rather than depending on its compositor's animation clock.
+      await js(`document.querySelector('#term > div:not(.term-gate)').getAnimations().forEach(animation => animation.finish())`);
+      const style = await js(`({ content: getComputedStyle(document.querySelector('#term > div:not(.term-gate)')).filter, gate: getComputedStyle(document.querySelector('#term .term-gate')).filter })`);
+      assert.equal(style.content, 'blur(3px)', state);
+      assert.equal(style.gate, 'none', state);
+      if (state !== 'connecting') assert.equal(await $('#term .gate-badge').isEnabled(), true);
+    }
+    await screenshotIfRequested('disconnected-blur.png', 'BUOY_COMPACT_SCREENSHOTS');
+    await fire('state', { id: 's1', state: 'connected' });
+    await fire('ready', { id: 's1' });
+    await browser.pause(200);
+    assert.equal(await js(`getComputedStyle(document.querySelector('#term > div:not(.term-gate)')).filter`), 'none');
+  });
+
   it('keeps icon actions visible, and refits the same terminal when the sidebar returns', async () => {
     assert.equal(await js(`document.querySelector('#sidebar h1') === null`), true);
     const geometry = await js(`({ width:innerWidth, sidebar:parseFloat(getComputedStyle(document.getElementById('sidebar')).width) })`);

@@ -85,7 +85,6 @@ button:focus-visible, [role=button]:focus-visible { outline:2px solid var(--acce
 #tabs .tab.plus { min-width:24px; width:24px; padding:0; align-self:center; background:transparent; border:0; }
 #tabs .tab-rename-input { font-size:11px; width:100px!important; }
 #term { padding:12px 15px 6px; }
-#term.gated > div:not(.term-gate) { filter:none; opacity:.6; }
 #term > .term-gate { align-items:flex-start; justify-content:flex-end; padding:7px; }
 .term-gate .gate-badge { border-radius:5px; color:var(--warning); border:1px solid var(--line); background:var(--surface); padding:5px 9px; box-shadow:none; }
 .term-gate .gate-badge.clickable { padding:6px; }

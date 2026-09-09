@@ -1546,13 +1546,8 @@ async function closeSession(id: string): Promise<void> {
 
   v.portEpoch = (v.portEpoch || 0) + 1;
 
-  if (!v.started) {
-    await mount(id);
-    if (!v.started || v.state === 'dead') {
-      setStatus('connect the session before closing it');
-      return;
-    }
-  }
+  // Close uses its own short-lived tmux command. Attaching first can recreate a session that
+  // already ended remotely, or prevent removal entirely when the initial attach fails.
   const hints = recoveryHints(v);
   setStatus(`saving and closing ${label}…`);
   try {
@@ -1563,8 +1558,10 @@ async function closeSession(id: string): Promise<void> {
     v.started = false;
     v.state = 'idle';
     v.meta.detached = true;
+    v.inputReady = false;
     setStatus(`close failed; session detached instead: ${errorMessage(error)}`);
     renderSidebar();
+    if (id === activeId) updateConsoleGate();
     return;
   }
   teardownViewUi(v);
@@ -1576,7 +1573,7 @@ async function closeSession(id: string): Promise<void> {
   if ([...views.values()].every(view => view.meta.archived)) historyOpen = true;
   v.meta.archivedAt = Date.now();
   v.meta.detached = false;
-  v.meta.recoveryTabs = hints;
+  if (hints.length) v.meta.recoveryTabs = hints;
   v.meta.restorePending = true;
   if (activeId === id) {
     activeId = null;
@@ -1691,7 +1688,10 @@ async function killSession(id: string): Promise<void> {
   try {
     const res = await api.kill(id);
     setStatus(res && res.killedRemote ? `killed ${label}` : `removed ${label}`);
-  } catch (_) { setStatus(`removed ${label}`); }
+  } catch (error) {
+    setStatus(`could not delete ${label}: ${errorMessage(error)}`);
+    return;
+  }
   removeView(id);
 }
 
