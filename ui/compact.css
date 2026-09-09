@@ -44,6 +44,10 @@ button:focus-visible, [role=button]:focus-visible { outline:2px solid var(--acce
   padding:0; gap:0; margin-left:auto; }
 .session.active .controls { background:transparent; }
 .session .controls .icon-button { width:23px; height:27px; }
+.session .controls .session-reconnect { color:var(--accent); }
+.session-reconnect[aria-busy=true] .ui-icon { animation:reconnect-spin 1s linear infinite; }
+@keyframes reconnect-spin { to { transform:rotate(360deg); } }
+@media(prefers-reduced-motion:reduce) { .session-reconnect[aria-busy=true] .ui-icon { animation:none; } }
 .session .notification-dot { width:4px; height:4px; margin:0 4px; box-shadow:none; }
 .sidebar-footer { display:flex; align-items:center; gap:3px; padding:5px 2px 0; border-top:1px solid var(--line); }
 .sidebar-footer>:last-child { margin-left:auto; }
@@ -84,6 +88,7 @@ button:focus-visible, [role=button]:focus-visible { outline:2px solid var(--acce
 #term.gated > div:not(.term-gate) { filter:none; opacity:.6; }
 #term > .term-gate { align-items:flex-start; justify-content:flex-end; padding:7px; }
 .term-gate .gate-badge { border-radius:5px; color:var(--warning); border:1px solid var(--line); background:var(--surface); padding:5px 9px; box-shadow:none; }
+.term-gate .gate-badge.clickable { padding:6px; }
 #term.gated.dead .gate-badge { color:var(--danger); border-color:var(--line); }
 #status { height:22px; flex:none; line-height:1; display:flex; align-items:center; gap:6px; padding:0 10px;
   font-size:10px; background:var(--bg); border-color:var(--line); color:var(--muted); }
