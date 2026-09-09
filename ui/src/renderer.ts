@@ -77,6 +77,7 @@ interface View {
   state: SessionState;
   started: boolean;
   connectionAttempt?: Promise<void>;
+  manualReconnect?: Promise<void>;
   portConnection?: Promise<void>;
   portEpoch?: number;
   inputReady: boolean;
@@ -246,25 +247,34 @@ termHost.appendChild(termGate);
 // Cleared when the session next reports a state (connected/reconnecting/dead) or after a timeout, so
 // a lost event can't wedge the control permanently.
 const reconnectPending = new Map<string, ReturnType<typeof setTimeout>>();   // id -> timeout handle
-function reconnectBusy(id: string): boolean { return reconnectPending.has(id); }
+function reconnectBusy(id: string): boolean {
+  const v = views.get(id);
+  return reconnectPending.has(id) || !!v?.manualReconnect || !!v?.connectionAttempt;
+}
+function canReconnect(v: View): boolean {
+  return !v.meta.archived && v.meta.mode !== 'local'
+    && (v.meta.mode === 'control' || v.meta.detached === true || v.state !== 'connected');
+}
+function quickReconnectVisible(v: View): boolean {
+  return canReconnect(v) && (v.meta.detached || v.state !== 'connected' || reconnectBusy(v.meta.id));
+}
 function markReconnecting(id: string): void {
   clearReconnect(id);
-  reconnectPending.set(id, setTimeout(() => reconnectPending.delete(id), 10000));
+  reconnectPending.set(id, setTimeout(() => {
+    reconnectPending.delete(id);
+    renderSidebar();
+    if (id === activeId) updateConsoleGate();
+  }, 10000));
 }
 function clearReconnect(id: string): void {
   const t = reconnectPending.get(id);
   if (t !== undefined) { clearTimeout(t); reconnectPending.delete(id); }
 }
 
-// §22: when a session has given up auto-reconnecting (Dead, after the attempt cap), the center
-// badge becomes a Reconnect button — clicking it calls the backend's manual retry (fresh budget).
+// Keep the terminal's direct action available even with the sidebar collapsed. Use the same
+// path as the session card so a failed first connection/closed backend can be recreated too.
 termGateBadge.addEventListener('click', () => {
-  const v = activeId != null ? views.get(activeId) : null;
-  if (v && v.state === 'dead' && !reconnectBusy(v.meta.id)) {
-    markReconnecting(v.meta.id);
-    api.retry(v.meta.id);
-    renderSidebar();
-  }
+  if (activeId) forceReconnect(activeId);
 });
 
 // §22: is the console fully "live" — connected AND (control mode) past the attach settle? When
@@ -291,15 +301,20 @@ function updateConsoleGate() {
   const gated = !!v && !isConsoleLive(v);
   termHost.classList.toggle('gated', gated);
   termHost.classList.toggle('dead', gated && v && (v.state === 'dead' || v.state === 'closed'));
-  // The badge is a clickable Reconnect button only when Dead (auto-reconnect exhausted).
-  const dead = gated && v && v.state === 'dead';
-  termGateBadge.classList.toggle('clickable', !!dead);
+  const actionable = !!v && canReconnect(v) && v.state !== 'connected' && v.state !== 'connecting';
+  const busy = !!v && reconnectBusy(v.meta.id);
+  termGateBadge.classList.toggle('clickable', actionable && !busy);
+  termGateBadge.disabled = !actionable || busy;
+  termGateBadge.setAttribute('aria-busy', String(busy));
   if (gated) {
-    const label = v.state === 'dead' ? '⟳ Reconnect'
-      : v.state === 'closed' ? 'disconnected'
-      : v.state === 'reconnecting' ? 'reconnecting…'
-      : 'connecting…';
-    termGateBadge.textContent = label;
+    if (actionable && !busy) {
+      setIcon(termGateBadge, 'refresh', 'Reconnect');
+    } else {
+      const label = busy || v.state === 'reconnecting' ? 'Reconnecting…'
+        : v.state === 'closed' || v.state === 'dead' ? 'Disconnected' : 'Connecting…';
+      termGateBadge.textContent = label;
+      labelControl(termGateBadge, label);
+    }
     // Never leave a blurred terminal holding focus/keystrokes while the link is broken.
     if (shouldDropInput(v)) {
       const t = activeTab(v);
@@ -823,7 +838,12 @@ function connectSession(v: View): Promise<void> {
     }
   })();
   v.connectionAttempt = attempt;
-  void attempt.finally(() => { if (v.connectionAttempt === attempt) delete v.connectionAttempt; }).catch(() => {});
+  void attempt.finally(() => {
+    if (v.connectionAttempt === attempt) delete v.connectionAttempt;
+    if (views.get(id) !== v) return;
+    renderSidebar();
+    if (id === activeId) updateConsoleGate();
+  }).catch(() => {});
   return attempt;
 }
 
@@ -834,6 +854,7 @@ function ensurePortSession(v: View): Promise<void> {
     if (v.meta.archived) throw new Error('This workspace has been closed.');
     // Ready can arrive before create_session returns and installs its backend in AppState.
     if (v.connectionAttempt) await v.connectionAttempt;
+    if (v.manualReconnect) await v.manualReconnect;
     if (views.get(v.meta.id) !== v || v.meta.archived || (v.portEpoch || 0) !== epoch) throw new Error('Workspace connection cancelled.');
     if (!v.started || v.meta.detached || v.state === 'closed') {
       v.started = false;
@@ -1029,7 +1050,7 @@ function renderSidebar() {
     li.innerHTML = `<span class="status-dots"><button type="button" class="icon-button connection" title="${escapeHtml(detail + ' · Connection details')}" aria-label="${escapeHtml(detail + ' · Connection details')}"><span class="dot ${v.meta.detached ? 'closed' : v.state}"></span></button></span>
       <span class="body"><span class="name-row"><span class="name" role="button" tabindex="0" title="${escapeHtml(detail + ' · Double-click to rename')}">${escapeHtml(v.meta.title || v.meta.session || v.meta.kind)}</span>
       ${sessionHasUnreadNotification(v) ? '<span class="notification-dot" aria-label="Unread notification"></span>' : ''}
-      <span class="controls">${control('more', 'Workspace actions', 'workspace-menu')}</span></span>
+      <span class="controls">${quickReconnectVisible(v) ? control('refresh', 'Reconnect', 'session-reconnect') : ''}${control('more', 'Workspace actions', 'workspace-menu')}</span></span>
       <span class="sub">${escapeHtml(detail)}</span>${renderTunnels(id, v)}</span>`;
     const nameEl = requiredDescendant<HTMLElement>(li, '.name');
     if (v.renaming) mountRenameInput(v, nameEl, id);
@@ -1041,6 +1062,14 @@ function renderSidebar() {
     };
     requiredDescendant<HTMLElement>(li, '.connection').onclick = e => { e.stopPropagation(); showConnection(id); };
     requiredDescendant<HTMLElement>(li, '.workspace-menu').onclick = e => { e.stopPropagation(); showWorkspaceActions(id); };
+    const reconnect = li.querySelector<HTMLButtonElement>('.session-reconnect');
+    if (reconnect) {
+      const busy = reconnectBusy(id) || v.state === 'connecting';
+      reconnect.disabled = busy;
+      reconnect.setAttribute('aria-busy', String(busy));
+      setIcon(reconnect, busy ? 'loading' : 'refresh', busy ? 'Reconnecting…' : 'Reconnect');
+      reconnect.onclick = e => { e.stopPropagation(); forceReconnect(id); };
+    }
     li.querySelectorAll<HTMLElement>('.tunnel').forEach(el => {
       const remote = Number(el.dataset.remote), key = `${id}:${remote}`;
       const button = requiredDescendant<HTMLElement>(el, '.tforce');
@@ -1077,7 +1106,7 @@ function showWorkspaceActions(id: string): void {
   add('rename', 'Rename workspace', () => startRename(id));
   add('info', 'Connection details', () => showConnection(id));
   const reconnect = add('refresh', 'Reconnect to the same session', () => forceReconnect(id), 'act reconnect');
-  reconnect.disabled = v.meta.mode !== 'control' || reconnectBusy(id);
+  reconnect.disabled = !canReconnect(v) || reconnectBusy(id);
   const detach = add('detach', 'Detach · Keep tmux running', () => detachSession(id), 'act detach');
   detach.disabled = v.meta.mode === 'local';
   add('end', 'End session · Save recovery state', () => closeSession(id), 'act kill danger');
@@ -1115,7 +1144,7 @@ function showConnection(id: string): void {
   panel.content.append(details);
   const footer = document.createElement('footer'); footer.className = 'dialog-footer';
   const reconnect = iconButton('refresh', 'Reconnect', () => { panel.dialog.close(); forceReconnect(id); });
-  reconnect.disabled = v.meta.mode !== 'control' || reconnectBusy(id);
+  reconnect.disabled = !canReconnect(v) || reconnectBusy(id);
   const detach = iconButton('detach', 'Detach · Keep tmux running', () => { panel.dialog.close(); void detachSession(id); });
   detach.disabled = v.meta.mode === 'local';
   footer.append(reconnect, detach); panel.content.append(footer);
@@ -1623,16 +1652,30 @@ recoverButton.onclick = () => { void checkOpenSessions(); };
 // new attach settles (Ready). tmux keeps the session alive, so windows/scrollback come back.
 function forceReconnect(id: string): void {
   const v = views.get(id);
-  if (!v || v.meta.mode !== 'control') return;   // only supervised control sessions reconnect
-  if (reconnectBusy(id)) { setStatus('reconnect already in progress…'); return; }
+  if (!v || !canReconnect(v) || reconnectBusy(id)) return;
+  const create = !v.started || v.meta.detached || v.state === 'closed' || v.meta.mode !== 'control';
+  const previousReady = v.inputReady;
   markReconnecting(id);
   v.inputReady = false;
-  if (id === activeId) updateConsoleGate();
   setStatus('reconnecting…');
-  Promise.resolve(api.forceReconnect(id)).catch(error => {
-    clearReconnect(id); setStatus('Reconnect failed: ' + errorMessage(error)); renderSidebar();
+  // Detached/unopened/failed-to-create sessions have no live supervisor to force. Recreate the
+  // client with the same persisted session identity, without selecting this background card.
+  if (create) v.started = false;
+  const request = create ? connectSession(v) : Promise.resolve().then(async () => { await api.forceReconnect(id); });
+  v.manualReconnect = request;
+  void request.catch(error => {
+    clearReconnect(id);
+    if (views.get(id) !== v) return;
+    if (!create) v.inputReady = previousReady;
+    setStatus('Reconnect failed: ' + errorMessage(error));
+  }).finally(() => {
+    if (v.manualReconnect === request) delete v.manualReconnect;
+    if (views.get(id) !== v) return;
+    renderSidebar();
+    if (id === activeId) updateConsoleGate();
   });
   renderSidebar();
+  if (id === activeId) updateConsoleGate();
 }
 
 // Permanent delete: active sessions lose tmux and metadata; archived sessions lose the snapshot.
@@ -2535,6 +2578,7 @@ async function init(reset = false): Promise<void> {
   if (reset) {
     for (const [, view] of views) teardownViewUi(view);
     views.clear();
+    for (const id of reconnectPending.keys()) clearReconnect(id);
     activeId = null;
     for (const id of Object.keys(pendingData)) delete pendingData[id];
     tabsEl.className = '';
