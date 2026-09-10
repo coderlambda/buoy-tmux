@@ -309,6 +309,7 @@ function updateConsoleGate() {
   if (gated) {
     if (actionable && !busy) {
       setIcon(termGateBadge, 'refresh', 'Reconnect');
+      termGateBadge.appendChild(document.createTextNode('Reconnect'));
     } else {
       const label = busy || v.state === 'reconnecting' ? 'Reconnecting…'
         : v.state === 'closed' || v.state === 'dead' ? 'Disconnected' : 'Connecting…';
