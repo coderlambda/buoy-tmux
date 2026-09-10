@@ -173,6 +173,13 @@ export interface TabContent {
   readonly kind: string;
   readonly mounted: boolean;
   readonly term?: XtermTerminal;
+  readonly search?: {
+    readonly isOpen: boolean;
+    open(): void;
+    close(): void;
+    setActive(active: boolean): void;
+    next(previous?: boolean): void;
+  } | undefined;
   mount(container: HTMLElement): void | Promise<void>;
   element?(): HTMLElement | null;
   onData(data: string): void;
