@@ -67,7 +67,9 @@ describe('Tauri UI: appearance', () => {
     await browser.keys('Escape');
     assert.equal(await js('document.querySelectorAll("dialog[open]").length'), 0);
     await browser.refresh();
-    await browser.waitUntil(async () => js('document.documentElement.dataset.theme === "dark"'));
+    // The inline theme bootstrap runs before the renderer bundle. Wait for the inspection hook
+    // as well, otherwise a fast reload can read it before the module has finished loading.
+    await browser.waitUntil(async () => js('document.documentElement.dataset.theme === "dark" && typeof window.__testTerminalState === "function"'));
     assert.equal((await appearance()).stored, 'dark');
     assert.deepEqual(await js('window.__errs'), []);
   });

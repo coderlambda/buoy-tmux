@@ -181,6 +181,10 @@ giving it the same persistent project and native-tab behavior as a remote worksp
 
 - Click a project to open or reconnect it.
 - Double-click a project or tab title to rename it.
+- Search the active terminal's loaded scrollback with **Cmd+F** on Mac or **Ctrl+F** elsewhere
+  (**Ctrl+Shift+F** also works), or click the search icon on the active tab. Use Enter/Shift+Enter
+  or F3/Shift+F3 to move between matches, and Escape to close. Queries and case/whole-word options
+  are kept separately for each tab; search text is never sent to the shell.
 - Drag projects vertically or tabs horizontally to reorder them.
 - Use **+** in the tab bar to create a tmux window.
 - Click a path in terminal output to preview or download the file.

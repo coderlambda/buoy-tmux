@@ -1,4 +1,5 @@
 import { terminalTheme, onThemeChange } from './theme.js';
+import { createTerminalSearch } from './terminalSearch.js';
 
 // Built-in 'terminal' tab-kind (§14/§15). Wraps an xterm.js terminal as a polymorphic
 // TabContent so the project/tab machinery can host it generically alongside future tab kinds
@@ -21,6 +22,8 @@ export interface TerminalTabContext {
   setStatus?(message: string): void;
   onBell?(): void;
   onInteract?(): void;
+  searchHost?: HTMLElement;
+  canFocus?(): boolean;
 }
 
 let repaintCount = 0;
@@ -40,11 +43,16 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
   const options: XtermTerminalOptions = {
     fontFamily: 'Menlo, Consolas, monospace', fontSize: 12,
     theme: terminalTheme(), scrollback: 5000,
+    // The pinned search addon uses xterm's decoration API for match highlights.
+    allowProposedApi: true,
     // §21: activate native OSC 8 hyperlinks in the Tauri webview. Our vendored xterm
     // suppresses persistent dotted/dashed decoration while preserving link IDs and hover.
   };
   if (spec.linkHandler) options.linkHandler = spec.linkHandler;
   const term = new Terminal(options);
+  const search = ctx.searchHost ? createTerminalSearch(term, ctx.searchHost, () => {
+    if (ctx.canFocus?.() !== false) term.focus();
+  }) : undefined;
   const unsubscribeTheme = onThemeChange(() => {
     if (term.options) term.options.theme = terminalTheme();
     term.refresh(0, Math.max(0, term.rows - 1));
@@ -105,6 +113,7 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
   return {
     kind: 'terminal',
     term,                      // raw handle (link provider, tests)
+    search,
     get mounted() { return mounted; },
 
     mount(container: HTMLElement) {
@@ -156,7 +165,7 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
 
     fit() { try { fit.fit(); } catch (_) {} return { cols: term.cols, rows: term.rows }; },
     resize(cols: number, rows: number) { try { term.resize(cols, rows); } catch (_) {} },
-    focus() { try { term.focus(); } catch (_) {} },
+    focus() { try { if (search?.isOpen) search.focus(); else term.focus(); } catch (_) {} },
     // Force xterm to re-render every row of the current buffer. This does not resize the grid,
     // touch the PTY, or alter scrollback, so it is safe on reveal/focus/wake recovery paths.
     repaintAllRows() {
@@ -173,7 +182,7 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
       return out;
     },
 
-    dispose() { unsubscribeTheme(); try { term.dispose(); } catch (_) {} if (el && el.parentNode) el.parentNode.removeChild(el); },
+    dispose() { search?.dispose(); unsubscribeTheme(); try { term.dispose(); } catch (_) {} if (el && el.parentNode) el.parentNode.removeChild(el); },
   };
 }
 

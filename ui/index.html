@@ -306,6 +306,7 @@
     </div>
     <div id="main">
       <div id="tabs"></div>
+      <div id="terminal-search"></div>
       <div id="term"></div>
       <section id="empty-state" hidden>
         <h2>No workspace open</h2>
@@ -317,7 +318,7 @@
         <ul id="history"></ul>
         <p id="history-empty" hidden>No closed sessions</p>
       </section>
-      <footer id="status"><button id="restore-sidebar" class="icon-button" type="button" data-icon="sidebar" aria-label="Show workspaces"></button><span id="status-mode">tmux</span><span id="status-message" class="sr-only" role="status"></span><span id="status-transport"></span></footer>
+      <footer id="status"><button id="restore-sidebar" class="icon-button" type="button" data-icon="sidebar" aria-label="Show workspaces"></button><span id="status-mode">tmux</span><button id="find-terminal" class="icon-button" type="button" data-icon="search" aria-label="Find in terminal" hidden></button><span id="status-message" class="sr-only" role="status"></span><span id="status-transport"></span></footer>
     </div>
   </div>
 
@@ -372,6 +373,7 @@
   <script src="/xterm.js"></script>
   <script src="/addon-fit.js"></script>
   <script src="/addon-canvas.js"></script>
+  <script src="/addon-search.js"></script>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

@@ -10,6 +10,7 @@ interface XtermBufferLine {
 interface XtermBuffer {
   readonly length: number;
   readonly baseY: number;
+  readonly viewportY: number;
   readonly cursorX: number;
   readonly cursorY: number;
   getLine(index: number): XtermBufferLine | undefined;
@@ -44,6 +45,7 @@ interface XtermTerminal {
   attachCustomKeyEventHandler(callback: (event: KeyboardEvent) => boolean): void;
   getSelection(): string;
   hasSelection(): boolean;
+  clearSelection(): void;
   open(element: HTMLElement): void;
   input(data: string, wasUserInput?: boolean): void;
   write(data: string, callback?: () => void): void;
@@ -56,6 +58,7 @@ interface XtermTerminal {
 }
 
 interface XtermTerminalOptions {
+  allowProposedApi?: boolean;
   fontFamily?: string;
   fontSize?: number;
   theme?: { background?: string; foreground?: string; cursor?: string; cursorAccent?: string; green?: string; selectionBackground?: string;
@@ -76,6 +79,30 @@ declare namespace CanvasAddon {
   class CanvasAddon {
     dispose(): void;
     clearTextureAtlas(): void;
+  }
+}
+
+interface XtermSearchOptions {
+  caseSensitive?: boolean;
+  wholeWord?: boolean;
+  incremental?: boolean;
+  decorations?: {
+    matchBackground?: string;
+    matchBorder?: string;
+    matchOverviewRuler: string;
+    activeMatchBackground?: string;
+    activeMatchBorder?: string;
+    activeMatchColorOverviewRuler: string;
+  };
+}
+declare namespace SearchAddon {
+  class SearchAddon {
+    constructor(options?: { highlightLimit?: number });
+    findNext(text: string, options?: XtermSearchOptions): boolean;
+    findPrevious(text: string, options?: XtermSearchOptions): boolean;
+    clearDecorations(): void;
+    onDidChangeResults(callback: (results: { resultIndex: number; resultCount: number }) => void): { dispose(): void };
+    dispose(): void;
   }
 }
 
@@ -145,6 +172,8 @@ interface Window {
     cursorX: number;
     cursorY: number;
     baseY: number;
+    viewportY: number;
+    selection: string;
     line: string;
     previous: string;
     next: string;

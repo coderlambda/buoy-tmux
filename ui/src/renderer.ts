@@ -14,6 +14,7 @@ import {
   getTerminalRepaintCount,
 } from './terminalTab.js';
 import type { TerminalTabContext, TerminalTabSpec } from './terminalTab.js';
+import { isTerminalFindShortcut } from './terminalSearch.js';
 import { createFileViewerTab } from './fileViewerTab.js';
 import { icon, iconButton, setIcon, hydrateIcons, openPanel, confirmAction, labelControl } from './uiControls.js';
 import type { IconName } from './uiControls.js';
@@ -162,7 +163,38 @@ function updateShell(): void {
   tabsEl.hidden = history;
   requiredElement('show-history').setAttribute('aria-pressed', String(history));
   requiredElement('history-empty').hidden = [...views.values()].some(v => v.meta.archived);
+  updateTabSearch();
 }
+
+function updateTabSearch(): void {
+  const v = activeId ? views.get(activeId) : undefined;
+  const selected = v && !historyOpen ? activeTab(v) : null;
+  for (const view of views.values()) {
+    for (const tab of view.tabs.values()) tab.content.search?.setActive(tab === selected && tab.mounted);
+  }
+  const button = requiredElement<HTMLButtonElement>('find-terminal');
+  button.hidden = !selected?.content.search || v?.meta.mode === 'control';
+  labelControl(button, 'Find in terminal · ' + (/Mac/.test(navigator.platform) ? '⌘F' : 'Ctrl+F'));
+}
+
+function openTerminalSearch(): void {
+  if (!historyOpen && activeId) activeTab(views.get(activeId)!)?.content.search?.open();
+}
+requiredElement('find-terminal').onclick = openTerminalSearch;
+document.addEventListener('keydown', event => {
+  if (event.isComposing || document.querySelector('dialog[open]') || historyOpen || !activeId) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest('input, textarea:not(.xterm-helper-textarea), [contenteditable=true]') && !target.closest('.terminal-find')) return;
+  const search = activeTab(views.get(activeId)!)?.content.search;
+  if (!search) return;
+  if (isTerminalFindShortcut(event, /Mac/.test(navigator.platform))) {
+    event.preventDefault(); event.stopImmediatePropagation(); search.open();
+  } else if (search.isOpen && (event.key === 'F3' || ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'g'))) {
+    event.preventDefault(); event.stopImmediatePropagation(); search.next(event.shiftKey);
+  } else if (search.isOpen && event.key === 'Escape') {
+    event.preventDefault(); event.stopImmediatePropagation(); search.close();
+  }
+}, true);
 
 function showHistory(show: boolean): void {
   historyOpen = show;
@@ -451,6 +483,8 @@ function ensureTab(v: View, winId: string): AppTab {
   let tab: AppTab;
   const { provider: linkProvider, linkHandler } = makeLinkProvider(() => tab.content.term, v.meta);
   const ctx = {
+    searchHost: requiredElement('terminal-search'),
+    canFocus: () => !shouldDropInput(v),
     // Forward keystrokes to the backend, which owns the real input gating (control mode buffers
     // during the initial attach settle and replays on ready). We only DROP input when the link is
     // genuinely broken (reconnecting/dead/closed) — where it would be silently discarded anyway —
@@ -903,6 +937,7 @@ function showActiveTab(v: View): void {
   // block they were already getting. Each tab kind's own CSS decides its display; this only toggles
   // VISIBILITY.
   for (const [, t] of v.tabs) { const el = t.content.element && t.content.element(); if (el) el.style.display = (t === tab) ? '' : 'none'; }
+  updateTabSearch();
   requestAnimationFrame(() => {
     // Window/session events can select another tab before this callback runs. Never fit a hidden
     // xterm: FitAddon then measures a collapsed box and can advertise a tiny grid back to tmux.
@@ -2019,6 +2054,7 @@ window.__testTerminalState = () => {
     theme: term.options?.theme,
     cols: term.cols, rows: term.rows,
     cursorX: buf.cursorX, cursorY: buf.cursorY, baseY: buf.baseY,
+    viewportY: buf.viewportY, selection: term.getSelection(),
     line: textAt(absoluteY), previous: textAt(absoluteY - 1), next: textAt(absoluteY + 1),
   };
 };
@@ -2128,7 +2164,7 @@ function renderTabs(v: View | null | undefined): void {
     el.className = 'tab' + (wid === v.activeWindow ? ' active' : '') + (tab.closing ? ' closing' : '');
     const color = v.tabColors[wid];
     if (color) { el.style.setProperty('--tab-color', color); el.classList.add('has-color'); }
-    el.innerHTML = `<span class="tlabel" title="${escapeHtml((tab.title || wid) + ' · Double-click to rename')}">${icon(tab.viewer ? 'file' : 'terminal')}<span class="ttext">${escapeHtml(tab.title || wid)}</span>${tab.unreadNotification ? '<span class="notification-dot" aria-label="Unread notification"></span>' : ''}</span>${control('x', tab.viewer ? 'Close preview' : 'End window', 'tclose')}`;
+    el.innerHTML = `<span class="tlabel" title="${escapeHtml((tab.title || wid) + ' · Double-click to rename')}">${icon(tab.viewer ? 'file' : 'terminal')}<span class="ttext">${escapeHtml(tab.title || wid)}</span>${tab.unreadNotification ? '<span class="notification-dot" aria-label="Unread notification"></span>' : ''}</span>${wid === v.activeWindow && tab.content.search ? control('search', 'Find in terminal · ' + (/Mac/.test(navigator.platform) ? '⌘F' : 'Ctrl+F'), 'tsearch') : ''}${control('x', tab.viewer ? 'Close preview' : 'End window', 'tclose')}`;
     const label = requiredDescendant<HTMLElement>(el, '.tlabel');
     label.setAttribute('role', 'button'); label.tabIndex = 0;
     label.setAttribute('aria-pressed', String(wid === v.activeWindow));
@@ -2152,6 +2188,7 @@ function renderTabs(v: View | null | undefined): void {
     // automatic-rename for that window); clearing it re-enables auto-rename.
     if (isWindowTab(wid)) label.ondblclick = (e) => { e.stopPropagation(); startTabRename(v, wid); };
     requiredDescendant<HTMLElement>(el, '.tclose').onclick = (e) => { e.stopPropagation(); closeTab(v, wid); };
+    el.querySelector<HTMLButtonElement>('.tsearch')?.addEventListener('click', event => { event.stopPropagation(); tab.content.search?.open(); });
     // §20: right-click a tab -> color palette; drag to reorder within the strip.
     el.oncontextmenu = (e) => { e.preventDefault(); openColorMenu(e, v.tabColors[wid], (c) => setTabColor(v, wid, c)); };
     wireTabDnD(el, v, wid);
@@ -2405,7 +2442,7 @@ requiredElement('empty-import').onclick = () => { requiredElement('new').click()
 requiredElement('show-help').onclick = () => {
   const panel = openPanel('Interactions');
   const details = document.createElement('dl'); details.className = 'dialog-details';
-  for (const [action, gesture] of [['Rename', 'Double-click or F2'], ['Reorder', 'Drag'], ['Link options', 'Shift + Cmd/Ctrl + click'], ['Dismiss', 'Escape'], ['Forward ports', '= Same port · ↗ Open · × Stop']]) {
+  for (const [action, gesture] of [['Rename', 'Double-click or F2'], ['Reorder', 'Drag'], ['Find in terminal', 'Cmd+F (Mac) · Ctrl+F · Ctrl+Shift+F'], ['Search matches', 'Enter / Shift+Enter · F3 / Shift+F3'], ['Link options', 'Shift + Cmd/Ctrl + click'], ['Dismiss', 'Escape'], ['Forward ports', '= Same port · ↗ Open · × Stop']]) {
     const row = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd');
     dt.textContent = action || ''; dd.textContent = gesture || ''; row.append(dt, dd); details.append(row);
   }
