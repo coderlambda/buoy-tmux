@@ -183,6 +183,7 @@ export interface TabContent {
   mount(container: HTMLElement): void | Promise<void>;
   element?(): HTMLElement | null;
   onData(data: string): void;
+  cancelInput?(): void;
   fit(): TerminalSize | null;
   resize(cols: number, rows: number): void;
   focus(): void;

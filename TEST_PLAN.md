@@ -266,6 +266,19 @@ cd src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --n
 - **live_remote_file / live_relative_path** — clicked-path preview + cwd resolution (§16–17).
 - **live_tunnel** — sticky `ssh -L` ports across a break (§18; see TC-LT above).
 
+## Large-paste regressions
+
+- `terminalInput.test.ts`: ordered chunks, native acknowledgement backpressure, Unicode/CRLF,
+  cancellation, rejected writes, and bounded recovery-command tracking with 2 million characters.
+- `pty_writer` Rust tests: a deliberately blocked writer and a real full raw PTY leave caller
+  locks available; receipts wait for delivery and fail on write errors or cancellation.
+- `live_large_paste`: private local tmux servers receive a 50,000-character single line and about
+  1 MB of bracketed Unicode/code input while producing output. Compare every received byte,
+  including literal `$HOME` and `${PATH}`.
+- `gui-large-paste`: xterm clipboard events in the native webview stream a large paste with
+  simulated slow writes and echoed output. Verify event-loop responsiveness, search/tab controls,
+  exact bytes and target, disconnect/disposal cancellation, and visible failure handling.
+
 ## Manual / deferred (documented, not run here)
 
 - mosh / Eternal Terminal transports and their Milestone-0 characterization (TC-M0 in the

@@ -895,9 +895,17 @@ unit-tested collaborators, so the coordinator holds little state and each rule i
   - **Input gating lives ONLY in the backend.** It buffers input until ready and while the target
     window's capture/cursor repaint transaction is pending (attach settled, fast
     path 500ms after `%session-changed`; spawn-time fallback guarantees ready even if that signal
-    never arrives), then replays in order. The renderer forwards keystrokes unconditionally and
-    keeps `inputReady` purely as a status-line flag — no second buffer/timer (that duplication was
-    removed).
+    never arrives), then replays in order. `inputReady` remains a renderer status flag; the
+    renderer does not duplicate the backend's attach/capture timers.
+  - **Large input uses backpressure.** Each terminal streams at most 4096 UTF-16 units per IPC
+    call, preserving surrogate pairs, CRLF, bracketed-paste bytes, and the originating window.
+    The next chunk waits for a native receipt and yields to the webview event loop. Receipt
+    completion means the bytes reached the OS PTY writer, not that the remote program processed
+    them. The backend holds receipts through attach/capture gating. A dedicated writer thread
+    handles all OS writes without holding application, supervisor, or parser locks; readers and
+    session controls remain available when SSH stops accepting input. Disconnect/teardown cancels
+    unsent input rather than replaying a paste tail after reconnect. Write errors stop the queue
+    and appear in the UI. tmux literal commands are bounded and escape dollar signs.
   - **The renderer is a dumb view keyed by window** — it holds no pane/topology state; it just
     mirrors the backend's window events into tabs and routes `{window}`-tagged data to that tab.
     All backend `data` is normalized to `{data, window?, pane?}` at the supervisor, so main/renderer

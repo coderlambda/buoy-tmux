@@ -21,6 +21,7 @@ export const config: WebdriverIO.Config = {
     './test/gui-session-history.ts',
     './test/gui-session-reconnect.ts',
     './test/gui-terminal-search.ts',
+    './test/gui-large-paste.ts',
     './test/gui-compact-ui.ts',
     './test/gui-theme.ts',
     './test/gui-tunnel-reconnect.ts',

@@ -8,6 +8,7 @@ pub mod control_parser;
 pub mod window_registry;
 pub mod reply_channel;
 pub mod tmux_keys;
+pub mod pty_writer;
 pub mod tmux_socket;
 pub mod validation;
 pub mod session_store;
@@ -69,11 +70,11 @@ enum Backend {
 }
 
 impl Backend {
-    fn write(&self, data: &str, win: Option<&str>) {
+    fn write(&self, data: &str, win: Option<&str>) -> pty_writer::WriteReceipt {
         match self {
-            Backend::Supervised(s) => s.write_to(data, win),
-            Backend::Plain(b) => b.write(data),
-            Backend::Local(b) => b.write(data),
+            Backend::Supervised(s) => s.write_tracked(data, win),
+            Backend::Plain(b) => b.write_tracked(data),
+            Backend::Local(b) => b.write_tracked(data),
         }
     }
     fn resize(&self, cols: u16, rows: u16) {
@@ -657,10 +658,17 @@ fn ui_log(msg: String) {
 }
 
 #[tauri::command]
-fn session_input(state: State<AppState>, id: String, data: String, win: Option<String>) {
-    if let Some(s) = state.sessions.lock().unwrap().get(&id) {
-        s.backend.write(&data, win.as_deref());
-    }
+async fn session_input(state: State<'_, AppState>, id: String, data: String, win: Option<String>) -> Result<(), String> {
+    // The renderer streams at most 4096 UTF-16 units per call (at most 12 KiB UTF-8).
+    // Reject oversized callers rather than doing unbounded encoding under the session lock.
+    if data.len() > 16 * 1024 { return Err("Terminal input chunk is too large".into()); }
+    let receipt = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(&id).ok_or("Session is not connected")?;
+        session.backend.write(&data, win.as_deref())
+    };
+    // No app, supervisor, parser, or writer mutex is held while waiting for a slow PTY.
+    tauri::async_runtime::spawn_blocking(move || receipt.wait()).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

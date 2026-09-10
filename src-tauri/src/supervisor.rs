@@ -10,6 +10,7 @@
 //! Testability: the backend factory and the sleep fn are injected, so the policy is unit-tested
 //! deterministically without real ssh or real time.
 
+use crate::pty_writer::WriteReceipt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -73,6 +74,10 @@ pub trait BackendHandle: Send {
     /// Write to the tmux window that originated the input. Non-windowed/fake backends can keep
     /// the session-wide behaviour; control mode overrides this to avoid tab-switch routing races.
     fn write_to(&self, data: &str, _target: Option<&str>) { self.write(data); }
+    fn write_tracked(&self, data: &str, target: Option<&str>) -> WriteReceipt {
+        self.write_to(data, target);
+        WriteReceipt::finished(Ok(()))
+    }
     fn resize(&self, cols: u16, rows: u16);
     fn new_window(&self);
     fn select_window(&self, win: &str);
@@ -86,6 +91,9 @@ impl BackendHandle for ControlBackend {
     fn write(&self, data: &str) { ControlBackend::write(self, data) }
     fn write_to(&self, data: &str, target: Option<&str>) {
         ControlBackend::write_to(self, data, target)
+    }
+    fn write_tracked(&self, data: &str, target: Option<&str>) -> WriteReceipt {
+        ControlBackend::write_tracked(self, data, target)
     }
     fn resize(&self, cols: u16, rows: u16) { ControlBackend::resize(self, cols, rows) }
     fn new_window(&self) { ControlBackend::new_window(self) }
@@ -347,6 +355,12 @@ impl Supervisor {
     pub fn write(&self, data: &str) { self.with_backend(|b| b.write(data)); }
     pub fn write_to(&self, data: &str, target: Option<&str>) {
         self.with_backend(|b| b.write_to(data, target));
+    }
+    pub fn write_tracked(&self, data: &str, target: Option<&str>) -> WriteReceipt {
+        match self.shared.backend.lock().unwrap().as_deref() {
+            Some(backend) => backend.write_tracked(data, target),
+            None => WriteReceipt::finished(Err("Session is not connected".into())),
+        }
     }
     pub fn resize(&self, cols: u16, rows: u16) {
         self.shared.cols.store(cols as u32, Ordering::Relaxed);
