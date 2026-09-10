@@ -3,11 +3,12 @@
 //! app-level events. Port of src/main/backends/controlModeBackend.js.
 //!
 //! Threading model: the pty reader runs on its own thread and feeds bytes to the parser; parsed
-//! events are handled under a Mutex-guarded `Inner` so writes (input/commands) and reads don't
-//! race. App-level events are delivered through a `BackendSink` callback (the session layer wires
+//! events are handled under a Mutex-guarded `Inner` so command/reply ordering cannot race. OS
+//! writes run on a separate writer thread, never holding the parser lock while a full PTY blocks.
+//! App-level events are delivered through a `BackendSink` callback (the session layer wires
 //! this to Tauri events).
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -16,6 +17,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system, MasterPty};
 
 use crate::control_parser::{ControlEvent, ControlModeParser};
 use crate::reply_channel::{ReplyChannel, ReplyKind};
+use crate::pty_writer::{Completion, PtyWriter, WriteReceipt};
 use crate::session_store::RecoveryWindow;
 use crate::tmux_keys::encode_send_keys;
 use crate::tmux_socket::socket_name;
@@ -79,7 +81,7 @@ struct Inner {
     parser: ControlModeParser,
     reg: WindowRegistry,
     reply: ReplyChannel,
-    writer: Box<dyn Write + Send>,
+    writer: PtyWriter,
     sink: BackendSink,
     session: String,
     managed: bool,
@@ -88,7 +90,7 @@ struct Inner {
     // Input can arrive before the control client is ready. Preserve its originating window while
     // buffering; otherwise a tab switch during startup/reconnect can replay protocol replies into
     // whichever window happens to be active later.
-    pending_input: Vec<(String, Option<String>)>,
+    pending_input: Vec<(String, Option<String>, Completion)>,
     // Both replies come from one tmux command list. Store the captured cells until the cursor
     // reply arrives, and hold input for that window until its repaint has been emitted.
     pending_captures: std::collections::BTreeMap<String, Option<Vec<String>>>,
@@ -161,7 +163,7 @@ impl ControlBackend {
             parser: ControlModeParser::new(),
             reg: WindowRegistry::new(),
             reply,
-            writer,
+            writer: PtyWriter::new(writer),
             sink: sink.clone(),
             session: cfg.session.clone(),
             managed: socket != "default",
@@ -212,7 +214,7 @@ impl ControlBackend {
                 // Reader ended (EOF / error / ssh died): stop the flush thread and flush any tail,
                 // then signal exit. Without setting `stopped` here the flush thread would leak for
                 // every backend the supervisor spawns over a session's lifetime.
-                { let mut g = inner.lock().unwrap(); g.stopped = true; g.flush_output(); }
+                { let mut g = inner.lock().unwrap(); g.stopped = true; g.pending_input.clear(); g.writer.stop(); g.flush_output(); }
                 sink(BackendEvent::Exit);
             });
         }
@@ -274,8 +276,12 @@ impl ControlBackend {
     /// protocol replies through the same onData path as keyboard input; the selected-window state
     /// can be briefly stale while tabs switch.
     pub fn write_to(&self, data: &str, target: Option<&str>) {
+        let _ = self.write_tracked(data, target);
+    }
+
+    pub fn write_tracked(&self, data: &str, target: Option<&str>) -> WriteReceipt {
         let target = target.filter(|w| is_win_id(w)).map(str::to_owned);
-        self.inner.lock().unwrap().write_input(data, target);
+        self.inner.lock().unwrap().write_input(data, target)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -324,7 +330,7 @@ impl ControlBackend {
     }
 
     pub fn kill(&self) {
-        { let mut g = self.inner.lock().unwrap(); g.stopped = true; g.flush_output(); }
+        { let mut g = self.inner.lock().unwrap(); g.stopped = true; g.pending_input.clear(); g.writer.stop(); g.flush_output(); }
         if let Ok(mut c) = self.child.lock() {
             let _ = c.kill();
         }
@@ -334,9 +340,7 @@ impl ControlBackend {
 impl Inner {
     fn send(&mut self, line: String, kind: ReplyKind) {
         self.reply.expect(kind);
-        let _ = self.writer.write_all(line.as_bytes());
-        let _ = self.writer.write_all(b"\n");
-        let _ = self.writer.flush();
+        self.writer.send(format!("{line}\n").as_bytes());
     }
 
     fn capture_window(&mut self, win: &str) {
@@ -352,8 +356,7 @@ impl Inner {
             "capture-pane -p -e -q -S -{} -t {} ; display-message -p -t {} '#{{cursor_x}} #{{cursor_y}}'\n",
             MAX_HISTORY, win, win,
         );
-        let _ = self.writer.write_all(command.as_bytes());
-        let _ = self.writer.flush();
+        self.writer.send(command.as_bytes());
     }
 
     fn emit(&self, ev: BackendEvent) {
@@ -627,16 +630,24 @@ impl Inner {
 
     /// Route shell/xterm input to its explicit originating window when provided, otherwise to the
     /// active window. Buffer until ready; an unaddressed item also waits for topology.
-    fn write_input(&mut self, data: &str, target: Option<String>) {
+    fn write_input(&mut self, data: &str, target: Option<String>) -> WriteReceipt {
+        let (receipt, done) = WriteReceipt::pending();
+        if self.stopped { return receipt; }
         match target.clone().or_else(|| self.reg.active_window.clone()) {
             Some(t) if self.ready && !self.pending_captures.contains_key(&t) => {
                 for line in encode_send_keys(data, &t) { self.send(line, ReplyKind::Ignore); }
+                self.writer.complete(done);
             }
             _ => {
-                if self.pending_input.len() >= MAX_BUFFER { self.pending_input.remove(0); }
-                self.pending_input.push((data.to_string(), target));
+                // Do not silently discard the start of a paste (including its bracket marker).
+                if self.pending_input.len() >= MAX_BUFFER {
+                    let _ = done.send(Err("Terminal is not ready for more input".into()));
+                } else {
+                    self.pending_input.push((data.to_string(), target, done));
+                }
             }
         }
+        receipt
     }
 
     /// Send buffered input to its explicit window, or the active window for legacy/unaddressed
@@ -647,16 +658,17 @@ impl Inner {
         let active = self.reg.active_window.clone();
         let queued = std::mem::take(&mut self.pending_input);
         crate::dlog!("flush_pending_input: {} chunks active={:?}", queued.len(), active);
-        for (data, explicit) in queued {
+        for (data, explicit, done) in queued {
             let target = explicit.clone().or_else(|| active.clone());
             if let Some(target) = target.filter(|t| !self.pending_captures.contains_key(t)) {
                 for line in encode_send_keys(&data, &target) {
                     self.send(line, ReplyKind::Ignore);
                 }
+                self.writer.complete(done);
             } else {
                 // Topology may still be unknown, or this window's capture/cursor transaction may
                 // still be pending. Preserve the original addressing until it becomes sendable.
-                self.pending_input.push((data, explicit));
+                self.pending_input.push((data, explicit, done));
             }
         }
     }
@@ -888,7 +900,7 @@ mod tests {
             parser: ControlModeParser::new(),
             reg: WindowRegistry::new(),
             reply,
-            writer: Box::new(CaptureWriter(sent.clone())),
+            writer: PtyWriter::inline(Box::new(CaptureWriter(sent.clone()))),
             sink,
             session: "s".into(),
             managed: true,
@@ -1148,15 +1160,21 @@ mod tests {
         Inner::mark_ready(&inner);
         sent.lock().unwrap().clear();
 
-        {
+        let receipt = {
             let mut g = inner.lock().unwrap();
             g.pending_captures.insert("@0".into(), None);
-            g.write_input("echo AFTER_REPAINT\n", Some("@0".into()));
+            let receipt = g.write_input("echo AFTER_REPAINT\n", Some("@0".into()));
             assert_eq!(g.pending_input.len(), 1, "input is held during capture");
-        }
+            receipt
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || { let _ = done_tx.send(receipt.wait()); });
+        assert!(matches!(done_rx.recv_timeout(Duration::from_millis(20)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)), "input acknowledgement waits for repaint too");
         assert!(!sent_str(&sent).contains("send-keys"), "nothing reaches tmux early");
 
         inner.lock().unwrap().finish_capture("@0");
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
         assert!(inner.lock().unwrap().pending_input.is_empty());
         let commands = sent_str(&sent);
         assert!(commands.contains("send-keys -t @0 -l \"echo AFTER_REPAINT\""));

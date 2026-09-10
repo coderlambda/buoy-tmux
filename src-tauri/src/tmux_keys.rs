@@ -9,6 +9,7 @@ pub fn escape_literal(part: &str) -> String {
         match c {
             '\\' => s.push_str("\\\\"),
             '"' => s.push_str("\\\""),
+            '$' => s.push_str("\\$"), // tmux expands variables inside double quotes
             '\t' => s.push_str("\\t"),
             '\x1b' => s.push_str("\\e"),
             _ if code < 0x20 => s.push_str(&format!("\\{:03o}", code)),
@@ -46,7 +47,12 @@ pub fn encode_send_keys(data: &str, target: &str) -> Vec<String> {
                 flush(&mut buf, &mut out);
                 out.push(format!("send-keys -t {} Enter", target));
             }
-            _ => buf.push(c),
+            _ => {
+                // Keep control protocol lines small even for a single multi-megabyte line.
+                // Split only between UTF-8 characters; escaping expands at most fourfold.
+                if buf.len() + c.len_utf8() > 1024 { flush(&mut buf, &mut out); }
+                buf.push(c);
+            }
         }
     }
     flush(&mut buf, &mut out);
@@ -107,5 +113,15 @@ mod tests {
     #[test]
     fn tc_tk7_empty() {
         assert!(encode_send_keys("", "@0").is_empty());
+    }
+
+    #[test]
+    fn variables_are_literal_and_long_unicode_lines_are_bounded() {
+        assert_eq!(escape_literal("$HOME ${PATH}"), "\\$HOME \\${PATH}");
+        let data = "中文🙂".repeat(20000);
+        let commands = encode_send_keys(&data, "@0");
+        assert!(commands.iter().all(|line| line.len() < 4200));
+        let decoded: String = commands.iter().map(|line| line.strip_prefix("send-keys -t @0 -l \"").unwrap().strip_suffix('"').unwrap()).collect();
+        assert_eq!(decoded, data);
     }
 }

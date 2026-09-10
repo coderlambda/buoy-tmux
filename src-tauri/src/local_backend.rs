@@ -13,7 +13,8 @@
 //! whose `build_ssh_args("")` rejects the empty host ("host: empty or too long") and surfaced as
 //! `failed to connect local: host`.
 
-use std::io::{Read, Write};
+use std::io::Read;
+use crate::pty_writer::{PtyWriter, WriteReceipt};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -37,7 +38,7 @@ pub struct LocalConfig {
 }
 
 pub struct LocalBackend {
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: Mutex<PtyWriter>,
     master: Box<dyn MasterPty + Send>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
@@ -116,17 +117,21 @@ impl LocalBackend {
         }
 
         Ok(LocalBackend {
-            writer: Arc::new(Mutex::new(writer)),
+            writer: Mutex::new(PtyWriter::new(writer)),
             master: pair.master,
             child: Arc::new(Mutex::new(child)),
         })
     }
 
-    pub fn write(&self, data: &str) {
+    pub fn write(&self, data: &str) { let _ = self.write_tracked(data); }
+
+    pub fn write_tracked(&self, data: &str) -> WriteReceipt {
+        let (receipt, done) = WriteReceipt::pending();
         if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(data.as_bytes());
-            let _ = w.flush();
+            w.send(data.as_bytes());
+            w.complete(done);
         }
+        receipt
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -134,6 +139,7 @@ impl LocalBackend {
     }
 
     pub fn kill(&self) {
+        if let Ok(w) = self.writer.lock() { w.stop(); }
         if let Ok(mut c) = self.child.lock() { let _ = c.kill(); }
     }
 }

@@ -1,5 +1,6 @@
 import { terminalTheme, onThemeChange } from './theme.js';
 import { createTerminalSearch } from './terminalSearch.js';
+import { createTerminalInput } from './terminalInput.js';
 
 // Built-in 'terminal' tab-kind (§14/§15). Wraps an xterm.js terminal as a polymorphic
 // TabContent so the project/tab machinery can host it generically alongside future tab kinds
@@ -16,7 +17,7 @@ export interface TerminalTabSpec {
 }
 
 export interface TerminalTabContext {
-  input(data: string): void;
+  input(data: string): void | Promise<unknown>;
   ack?(bytes: number): void;
   copyText?(text: string): void;
   setStatus?(message: string): void;
@@ -93,7 +94,9 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
   const preOpen: string[] = [];   // bytes buffered until the xterm is opened
 
   // input up (gating is applied by the caller via ctx.input, which may buffer)
-  term.onData((data) => ctx.input(data));
+  const input = createTerminalInput(ctx.input, () => ctx.canFocus?.() !== false,
+    error => ctx.setStatus?.(`Input failed: ${error instanceof Error ? error.message : String(error)}`));
+  term.onData(data => input.push(data));
   // xterm consumes a standalone BEL byte and surfaces it through onBell instead of leaving it in
   // the rendered data stream. Codex's default notification method falls back to BEL for terminals
   // it does not recognize, so forward that standard attention signal to the project/tab layer.
@@ -114,6 +117,7 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
     kind: 'terminal',
     term,                      // raw handle (link provider, tests)
     search,
+    cancelInput: input.cancel,
     get mounted() { return mounted; },
 
     mount(container: HTMLElement) {
@@ -182,7 +186,7 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
       return out;
     },
 
-    dispose() { search?.dispose(); unsubscribeTheme(); try { term.dispose(); } catch (_) {} if (el && el.parentNode) el.parentNode.removeChild(el); },
+    dispose() { input.dispose(); search?.dispose(); unsubscribeTheme(); try { term.dispose(); } catch (_) {} if (el && el.parentNode) el.parentNode.removeChild(el); },
   };
 }
 

@@ -15,6 +15,7 @@ import {
 } from './terminalTab.js';
 import type { TerminalTabContext, TerminalTabSpec } from './terminalTab.js';
 import { isTerminalFindShortcut } from './terminalSearch.js';
+import { trackCommandText } from './terminalInput.js';
 import { createFileViewerTab } from './fileViewerTab.js';
 import { icon, iconButton, setIcon, hydrateIcons, openPanel, confirmAction, labelControl } from './uiControls.js';
 import type { IconName } from './uiControls.js';
@@ -239,28 +240,7 @@ themeButton.onclick = () => {
 };
 
 function trackCommandInput(tab: AppTab | null, data: string): void {
-  if (!tab || !data) return;
-  // Remove terminal protocol and arrow-key escape sequences. Human text and paste content remain;
-  // xterm device replies must never become a recoverable shell command.
-  const text = data
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
-  let draft = tab.commandDraft || '';
-  for (const character of Array.from(text)) {
-    if (character === '\r' || character === '\n') {
-      const command = draft.trim();
-      if (command) tab.lastCommand = command.slice(0, 4096);
-      draft = '';
-    } else if (character === '\x7f' || character === '\b') {
-      draft = Array.from(draft).slice(0, -1).join('');
-    } else if (character === '\x15' || character === '\x03') {
-      draft = '';
-    } else if (character >= ' ' && character !== '\x7f') {
-      draft += character;
-      if (draft.length > 4096) draft = draft.slice(-4096);
-    }
-  }
-  tab.commandDraft = draft;
+  if (tab && data) trackCommandText(tab, data);
 }
 
 // §22: console gate overlay — a blurred, non-interactive scrim shown while the active session is
@@ -496,7 +476,7 @@ function ensureTab(v: View, winId: string): AppTab {
     input: (data: string) => {
       if (shouldDropInput(v)) return;
       trackCommandInput(tab, data);
-      void api.input(v.meta.id, data, winId);
+      return api.input(v.meta.id, data, winId);
     },
     ack: (bytes: number) => api.ack(v.meta.id, bytes),
     // Clipboard: xterm ignores OSC 52 by default and there's no built-in Cmd+C, so the terminal
@@ -2065,6 +2045,9 @@ api.onState(({ id, state }) => {
   const v = views.get(id);
   if (!v) return;
   v.state = state;
+  if (state !== 'connected') {
+    for (const tab of v.tabs.values()) tab.content.cancelInput?.();
+  }
   if (state === 'connecting' && v.meta.mode === 'control') {
     // A fresh backend needs a fresh, post-resize capture even when the existing xterm/tab objects
     // survive a supervisor reconnect. The backend gates input until that repaint completes.
