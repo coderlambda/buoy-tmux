@@ -703,13 +703,13 @@ async fn session_close(app: AppHandle, id: String, tabs: Vec<RecoveryTabHint>) -
         let state = app.state::<AppState>();
         let operation = state.lifecycle_lock(&id);
         let _guard = operation.lock().unwrap();
-        session_close_inner(app.state::<AppState>(), id, tabs)
+        session_close_inner(&app.state::<AppState>(), id, tabs)
     }).await.map_err(|error| error.to_string())?
 }
 
-fn session_close_inner(state: State<AppState>, id: String, tabs: Vec<RecoveryTabHint>) -> Result<(), String> {
+fn session_close_inner(state: &AppState, id: String, tabs: Vec<RecoveryTabHint>) -> Result<(), String> {
     // Close is intentionally destructive to the remote tmux server. Snapshot first; unlike Detach,
-    // only a successfully captured and killed session is moved to History.
+    // archive when tmux was killed or is already gone, keeping cached hints in the latter case.
     let meta = state.store.load().into_iter().find(|saved| saved.id == id)
         .ok_or_else(|| "unknown session".to_string())?;
     let hints: Vec<_> = tabs.into_iter().map(|tab| session_recovery::CommandHint {
@@ -771,17 +771,21 @@ async fn session_kill(app: AppHandle, id: String) -> Result<serde_json::Value, S
         let state = app.state::<AppState>();
         let operation = state.lifecycle_lock(&id);
         let _guard = operation.lock().unwrap();
-        session_kill_inner(app.state::<AppState>(), id)
+        session_kill_inner(&app.state::<AppState>(), id)
     })
         .await.map_err(|error| error.to_string())
 }
 
-fn session_kill_inner(state: State<AppState>, id: String) -> serde_json::Value {
+fn session_kill_inner(state: &AppState, id: String) -> serde_json::Value {
     // Kill: terminate the remote tmux session and remove it.
+    let saved = state.store.load().into_iter().find(|s| s.id == id);
     let meta = {
         let mut sessions = state.sessions.lock().unwrap();
         sessions.remove(&id).map(|s| { s.backend.kill(); s.meta })
-    }.or_else(|| state.store.load().into_iter().find(|s| s.id == id));
+    };
+    // History deletion is local: an identically named tmux session may have been started since
+    // this snapshot was archived. Never contact or kill it when deleting the saved snapshot.
+    let meta = if saved.as_ref().is_some_and(|s| s.archived) { None } else { meta.or(saved) };
     state.tunnels.forget_session(&id);   // kill removes the session -> forget its persisted ports
 
     let mut killed_remote = false;
@@ -1253,6 +1257,47 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_session_can_be_archived_and_deleted_without_reconnecting() {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = probe::probe_local_tmux();
+        if probe.version.is_none() { return; }
+        let root = std::env::temp_dir().join(format!("buoy-remove-session-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            lifecycle: Mutex::new(HashMap::new()), sessions: Mutex::new(HashMap::new()),
+            store: SessionStore::new(root.join("sessions.json")),
+            tunnels: tunnel::TunnelRegistry::with_store(root.join("tunnels.json")),
+            hosts: host_history::HostHistory::load(root.join("hosts.json")),
+            config: Mutex::new(AppConfig::default()), previews: html_preview::PreviewStore::default(),
+        };
+        let meta: SessionMeta = serde_json::from_value(json!({
+            "id": "missing", "host": "", "session": "dt-missing", "transport": "local",
+            "mode": "control", "tmuxPath": probe.tmux_path,
+            "socketName": format!("buoy-remove-session-{}", std::process::id()),
+            "recoveryTabs": [{ "window": "@0", "title": "shell", "cwd": "/tmp", "lastCommand": "pwd" }],
+        })).unwrap();
+        state.store.update(|saved| saved.push(meta));
+        session_close_inner(&state, "missing".into(), vec![]).unwrap();
+        let archived = state.store.load().remove(0);
+        assert!(archived.archived && archived.restore_pending);
+        assert_eq!(archived.recovery_tabs[0].cwd, "/tmp");
+        assert!(state.sessions.lock().unwrap().is_empty());
+
+        // If History deletion accidentally contacts tmux, this executable records it and returns
+        // success as though it had killed an identically named, newly created remote session.
+        let marker = root.join("contacted-remote");
+        let binary = root.join("tmux");
+        std::fs::write(&binary, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        state.store.update_session("missing", |saved| saved.tmux_path = Some(binary.to_string_lossy().into()));
+        assert_eq!(session_kill_inner(&state, "missing".into())["killedRemote"], false);
+        assert!(state.store.load().is_empty());
+        assert!(!marker.exists(), "deleting History must never contact tmux");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     // TC-CM1 the local mode matrix (§5.3b). `choose_mode` is the single branch that decides whether a
     // session gets native tabs + a reconnect supervisor, plain tmux, or the non-durable raw pty — and

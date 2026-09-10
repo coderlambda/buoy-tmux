@@ -78,7 +78,37 @@ fn field(value: &str) -> String {
         .unwrap_or_default()
 }
 
+// `has-session` also fails for authentication, permission, and missing-binary errors. Only the
+// known tmux missing-session/socket messages mean the remote session is already closed.
+const CHECK_SESSION: &str = r#"
+check_session() {
+  if error=$(LC_ALL=C "$t" -L "$s" has-session -t "=$n" 2>&1); then return 0; fi
+  case "$error" in
+    "can't find session: "*|"no server running on "*|"error connecting to "*" (No such file or directory)") return 44 ;;
+  esac
+  printf '%s\n' "$error" >&2
+  return 1
+}
+"#;
+
+fn cached_tabs(meta: &SessionMeta, hints: &[CommandHint]) -> Vec<RecoveryTab> {
+    let mut tabs = meta.recovery_tabs.clone();
+    for hint in hints {
+        if let Some(tab) = tabs.iter_mut().find(|tab| tab.window == hint.window) {
+            if !hint.title.is_empty() { tab.title = hint.title.clone(); }
+            if !hint.last_command.is_empty() { tab.last_command = hint.last_command.clone(); }
+        } else {
+            tabs.push(RecoveryTab {
+                window: hint.window.clone(), title: hint.title.clone(),
+                cwd: String::new(), shell: String::new(), last_command: hint.last_command.clone(),
+            });
+        }
+    }
+    tabs
+}
+
 /// Snapshot all tmux windows and kill the remote session only after the snapshot command succeeds.
+/// An already missing session is closed successfully using the previously saved recovery hints.
 pub fn snapshot_and_kill(
     meta: &SessionMeta,
     hints: &[CommandHint],
@@ -87,9 +117,9 @@ pub fn snapshot_and_kill(
     let socket = socket(meta);
     let session = &meta.session;
     let script = format!(
-        "t={}; s={}; n={}; \
-         \"$t\" -L \"$s\" has-session -t \"$n\" 2>/dev/null || exit 44; \
-         \"$t\" -L \"$s\" list-windows -t \"$n\" -F '#{{window_id}}' | while IFS= read -r w; do \
+        "t={}; s={}; n={}; {CHECK_SESSION} \
+         check_session || exit $?; \
+         \"$t\" -L \"$s\" list-windows -t \"=$n\" -F '#{{window_id}}' | while IFS= read -r w; do \
            title=$(\"$t\" -L \"$s\" display-message -p -t \"$w\" '#{{window_name}}'); \
            cwd=$(\"$t\" -L \"$s\" display-message -p -t \"$w\" '#{{pane_current_path}}'); \
            pid=$(\"$t\" -L \"$s\" display-message -p -t \"$w\" '#{{pane_pid}}'); \
@@ -99,15 +129,18 @@ pub fn snapshot_and_kill(
            printf %s \"$cwd\" | base64 | tr -d '\\n'; printf '\\t'; \
            printf %s \"$shell\" | base64 | tr -d '\\n'; printf '\\n'; \
          done; \
-         \"$t\" -L \"$s\" kill-session -t \"$n\"",
+         \"$t\" -L \"$s\" kill-session -t \"=$n\" || {{ \
+           check_session; code=$?; [ \"$code\" -eq 44 ] && exit 0; exit 1; \
+         }}",
         shell_quote(tmux), shell_quote(&socket), shell_quote(session),
     );
     let output = run_script(meta, &script)?;
+    if output.status.code() == Some(44) {
+        return Ok(cached_tabs(meta, hints));
+    }
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if output.status.code() == Some(44) {
-            "remote tmux session is not running".into()
-        } else if message.is_empty() {
+        return Err(if message.is_empty() {
             format!(
                 "could not snapshot and close tmux (status {:?})",
                 output.status.code()
@@ -251,6 +284,71 @@ pub fn is_open(meta: &SessionMeta) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_meta(name: &str, tmux_path: &str) -> SessionMeta {
+        serde_json::from_value(serde_json::json!({
+            "id": name, "host": "", "session": format!("dt-{name}"),
+            "transport": "local", "mode": "control", "tmuxPath": tmux_path,
+            "socketName": format!("buoy-{name}-{}", std::process::id()),
+        })).unwrap()
+    }
+
+    #[test]
+    fn close_missing_session_is_idempotent_and_does_not_kill_a_prefix_match() {
+        let probe = crate::probe::probe_local_tmux();
+        if probe.version.is_none() { return; }
+        let mut meta = test_meta("missing-close", &probe.tmux_path);
+        meta.recovery_tabs = vec![RecoveryTab {
+            window: "@2".into(), title: "old title".into(), cwd: "/tmp".into(),
+            shell: "zsh".into(), last_command: "pwd".into(),
+        }];
+        let hints = vec![CommandHint {
+            window: "@2".into(), title: "shell".into(), last_command: "echo latest".into(),
+        }];
+        let tabs = snapshot_and_kill(&meta, &hints).unwrap();
+        assert_eq!(tabs[0].cwd, "/tmp");
+        assert_eq!(tabs[0].shell, "zsh");
+        assert_eq!(tabs[0].title, "shell");
+        assert_eq!(tabs[0].last_command, "echo latest");
+        assert_eq!(snapshot_and_kill(&meta, &hints).unwrap(), tabs);
+        assert!(!is_open(&meta).unwrap(), "closing must not create a new session");
+
+        struct ServerCleanup(SessionMeta);
+        impl Drop for ServerCleanup {
+            fn drop(&mut self) {
+                let _ = Command::new(self.0.tmux_path.as_ref().unwrap())
+                    .args(["-L", &socket(&self.0), "kill-server"]).output();
+            }
+        }
+        let _cleanup = ServerCleanup(meta.clone());
+        let sibling = format!("{}-other", meta.session);
+        assert!(Command::new(&probe.tmux_path)
+            .args(["-L", &socket(&meta), "new-session", "-d", "-s", &sibling])
+            .status().unwrap().success());
+        assert_eq!(snapshot_and_kill(&meta, &hints).unwrap(), tabs);
+        assert!(Command::new(&probe.tmux_path)
+            .args(["-L", &socket(&meta), "has-session", "-t", &format!("={sibling}")])
+            .status().unwrap().success(), "a similarly named live session must survive");
+        meta.recovery_tabs.clear();
+        assert!(snapshot_and_kill(&meta, &[]).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn close_does_not_treat_command_or_permission_errors_as_a_missing_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("buoy-close-errors-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tmux");
+        let meta = test_meta("close-errors", path.to_str().unwrap());
+        assert!(snapshot_and_kill(&meta, &[]).is_err(), "missing tmux binary is an error");
+        for message in ["error connecting to /tmp/socket (Permission denied)", "Permission denied (publickey).", "unexpected tmux failure"] {
+            std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' {} >&2\nexit 1\n", shell_quote(message))).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(snapshot_and_kill(&meta, &[]).unwrap_err().contains(message));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn shell_quote_handles_commands_without_making_them_executable_syntax() {
