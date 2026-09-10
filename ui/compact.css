@@ -85,10 +85,12 @@ button:focus-visible, [role=button]:focus-visible { outline:2px solid var(--acce
 #tabs .tab.plus { min-width:24px; width:24px; padding:0; align-self:center; background:transparent; border:0; }
 #tabs .tab-rename-input { font-size:11px; width:100px!important; }
 #term { padding:12px 15px 6px; }
-#term > .term-gate { align-items:flex-start; justify-content:flex-end; padding:7px; }
-.term-gate .gate-badge { border-radius:5px; color:var(--warning); border:1px solid var(--line); background:var(--surface); padding:5px 9px; box-shadow:none; }
-.term-gate .gate-badge.clickable { padding:6px; }
-#term.gated.dead .gate-badge { color:var(--danger); border-color:var(--line); }
+#term > .term-gate { align-items:center; justify-content:center; padding:12px; }
+.term-gate .gate-badge { display:inline-flex; align-items:center; gap:7px; border-radius:16px;
+  color:var(--warning); border:1px solid var(--line); background:var(--surface); padding:6px 14px;
+  box-shadow:0 4px 20px rgba(0,0,0,.25); }
+.term-gate .gate-badge.clickable { padding:8px 18px; color:var(--danger); border-color:var(--danger); }
+#term.gated.dead .gate-badge { color:var(--danger); border-color:var(--danger); }
 #status { height:22px; flex:none; line-height:1; display:flex; align-items:center; gap:6px; padding:0 10px;
   font-size:10px; background:var(--bg); border-color:var(--line); color:var(--muted); }
 #status-mode { display:flex; gap:5px; align-items:center; }
