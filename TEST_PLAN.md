@@ -47,6 +47,8 @@ a deterministic "the connection broke" with no network dependency.
 
 - **TC-TP1** `pick_local_port` hands a free remembered port straight back; falls back when something
   else holds it; treats `None` and `Some(0)` as "no memory" (0 is serde's default, not port 0).
+  Same-port mappings (`local == remote`) are pinned instead: opens/restores report a conflict and
+  retain the requested port, including records loaded from an older app version.
 - **TC-TP2** the remembered port survives the two events that used to lose it — the ssh dying
   (`close_session` clears `pid`, **keeps** `local`) and an app restart (reload from disk) — while an
   explicit `close()` *does* forget it. Also asserts the row reads inactive-but-known meanwhile.
@@ -67,6 +69,22 @@ a deterministic "the connection broke" with no network dependency.
   session has no remote).
 
 Mutation-verified — see the table in DESIGN.md §18 for the six mutations and what caught each.
+
+### Isolated SSH tunnel readiness (`tests/tunnel_readiness.rs`)
+
+Run `python3 test/run-tunnel-readiness.py`. The runner creates temporary SSH keys, a loopback sshd,
+and a test TLS certificate. It uses no saved Buoy sessions or remote hosts.
+
+- Concurrent opens share one forward and wait for a delayed remote service.
+- A live but stalled SSH child is replaced on its original local port.
+- HTTPS readiness and persisted schemes survive reconnects.
+- A same-port conflict cannot silently choose a random port; retry after the conflict clears uses
+  the original port. IPv6-only test services let the local IPv4 forward use the same number.
+- Slow HTTP responses and one transient failed probe reuse the existing SSH PID, preserving live
+  browser/WebSocket connections. Slow services also remain active in sidebar status.
+- A stalled SSH process adopted after an app restart is terminated before the same port is reused.
+  Unit tests additionally verify cleanup does not signal unrelated PIDs, readiness honors its time
+  budget, and slow probes do not hold the global registry lock.
 
 ### TC-LT — Live tunnel (`tests/live_tunnel.rs`, `#[ignore]`, needs a real host)
 ```

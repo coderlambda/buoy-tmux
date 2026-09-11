@@ -14,14 +14,28 @@ fn connection() -> (String, Vec<String>) {
         "-o".into(), "StrictHostKeyChecking=no".into(), "-o".into(), "UserKnownHostsFile=/dev/null".into()])
 }
 
-struct Server { port: u16, stop: Arc<std::sync::atomic::AtomicBool>, worker: Option<std::thread::JoinHandle<()>> }
+struct Server {
+    port: u16,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    response_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+    drop_next: Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
 impl Server {
     fn http(delay: Duration) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        Self::http_at("127.0.0.1:0", delay)
+    }
+
+    fn http_at(address: &str, delay: Duration) -> Self {
+        let listener = TcpListener::bind(address).unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop.clone();
+        let response_delay_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let latency = response_delay_ms.clone();
+        let drop_next = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_request = drop_next.clone();
         let worker = std::thread::spawn(move || {
             std::thread::sleep(delay);
             while !flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -29,13 +43,99 @@ impl Server {
                     stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
                     let mut request = [0; 256];
                     if stream.read(&mut request).unwrap_or(0) > 0 {
+                        if drop_request.swap(false, std::sync::atomic::Ordering::Relaxed) { continue; }
+                        std::thread::sleep(Duration::from_millis(latency.load(std::sync::atomic::Ordering::Relaxed)));
                         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     }
                 } else { std::thread::sleep(Duration::from_millis(10)); }
             }
         });
-        Self { port, stop, worker: Some(worker) }
+        Self { port, stop, response_delay_ms, drop_next, worker: Some(worker) }
     }
+}
+
+#[test]
+#[ignore = "requires a disposable loopback sshd"]
+fn same_port_reconnect_does_not_silently_move_when_the_local_port_is_taken() {
+    let (host, args) = connection();
+    // The destination listens only on IPv6; ssh binds the local IPv4 side at the SAME port.
+    // This models two machines while keeping the test isolated on one loopback SSH server.
+    let server = Server::http_at("[::1]:0", Duration::ZERO);
+    let reg = TunnelRegistry::new();
+    assert_eq!(reg.force_same_port("pinned", &host, server.port, &args).unwrap(), server.port);
+    reg.close_session("pinned");
+    let occupying = TcpListener::bind(("127.0.0.1", server.port)).unwrap();
+    let result = reg.ensure_ready("pinned", &host, server.port, TunnelScheme::Http, &args);
+    let automatic = reg.restore_ready_if("pinned", &host, &args, || true);
+    // Clean up even against the old implementation, which silently creates a random mapping.
+    reg.close_session("pinned");
+    drop(occupying);
+    let retried = reg.ensure_ready("pinned", &host, server.port, TunnelScheme::Http, &args);
+    reg.forget_session("pinned");
+    assert!(result.is_err(), "same-port reconnect must report a conflict, not move to {result:?}");
+    assert!(automatic.is_empty(), "automatic restore must also keep the pinned port");
+    assert_eq!(retried.unwrap(), server.port, "retry retains the requested port after it becomes free");
+}
+
+#[test]
+#[ignore = "requires a disposable loopback sshd"]
+fn a_slow_service_does_not_replace_a_healthy_same_port_ssh() {
+    let (host, args) = connection();
+    let server = Server::http_at("[::1]:0", Duration::ZERO);
+    let path = std::env::temp_dir().join(format!("buoy-slow-same-{}.json", std::process::id()));
+    let reg = TunnelRegistry::with_store(path.clone());
+    reg.force_same_port("slow", &host, server.port, &args).unwrap();
+    let before: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    server.response_delay_ms.store(1200, std::sync::atomic::Ordering::Relaxed);
+    let result = reg.force_same_port("slow", &host, server.port, &args);
+    let active = reg.status("slow")[0].active;
+    let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    reg.forget_session("slow");
+    let _ = std::fs::remove_file(path);
+    assert_eq!(result.unwrap(), server.port, "a 1.2-second HTTP response is still reachable");
+    assert!(active, "a slow HTTP response must not make a healthy tunnel look disconnected");
+    assert_eq!(after["slow"][0]["pid"], before["slow"][0]["pid"], "probing must not tear down healthy browser/WebSocket connections");
+}
+
+#[test]
+#[ignore = "requires a disposable loopback sshd"]
+fn one_failed_probe_does_not_replace_a_healthy_ssh() {
+    let (host, args) = connection();
+    let server = Server::http(Duration::ZERO);
+    let path = std::env::temp_dir().join(format!("buoy-transient-probe-{}.json", std::process::id()));
+    let reg = TunnelRegistry::with_store(path.clone());
+    let local = reg.ensure_ready("retry", &host, server.port, TunnelScheme::Http, &args).unwrap();
+    let before: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    server.drop_next.store(true, std::sync::atomic::Ordering::Relaxed);
+    let result = reg.ensure_ready("retry", &host, server.port, TunnelScheme::Http, &args);
+    let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    reg.forget_session("retry");
+    let _ = std::fs::remove_file(path);
+    assert_eq!(result.unwrap(), local);
+    assert_eq!(after["retry"][0]["pid"], before["retry"][0]["pid"], "one failed request should retry the existing SSH child");
+}
+
+#[test]
+#[ignore = "requires a disposable loopback sshd"]
+fn same_port_recovers_a_stalled_ssh_adopted_after_an_app_restart() {
+    let (host, args) = connection();
+    let server = Server::http_at("[::1]:0", Duration::ZERO);
+    let path = std::env::temp_dir().join(format!("buoy-adopted-same-{}.json", std::process::id()));
+    let original = TunnelRegistry::with_store(path.clone());
+    original.force_same_port("adopted", &host, server.port, &args).unwrap();
+    let before: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let pid = before["adopted"][0]["pid"].as_u64().unwrap().to_string();
+    // A relaunched app only has the persisted PID, not the original Child handle. Retain the
+    // original registry here solely to reap the test process even if the regression fails.
+    let adopted = TunnelRegistry::with_store(path.clone());
+    assert!(std::process::Command::new("kill").args(["-STOP", &pid]).status().unwrap().success());
+    let restored = adopted.restore_ready_if("adopted", &host, &args, || true);
+    let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    adopted.forget_session("adopted");
+    original.forget_session("adopted");
+    let _ = std::fs::remove_file(path);
+    assert_eq!(restored, vec![(server.port, server.port)], "the old listener must release the pinned local port");
+    assert_ne!(after["adopted"][0]["pid"], before["adopted"][0]["pid"]);
 }
 impl Drop for Server {
     fn drop(&mut self) {
