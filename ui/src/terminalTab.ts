@@ -170,8 +170,8 @@ export function createTerminalTab(spec: TerminalTabSpec, ctx: TerminalTabContext
     fit() { try { fit.fit(); } catch (_) {} return { cols: term.cols, rows: term.rows }; },
     resize(cols: number, rows: number) { try { term.resize(cols, rows); } catch (_) {} },
     focus() { try { if (search?.isOpen) search.focus(); else term.focus(); } catch (_) {} },
-    // Force xterm to re-render every row of the current buffer. This does not resize the grid,
-    // touch the PTY, or alter scrollback, so it is safe on reveal/focus/wake recovery paths.
+    // The vendored refresh also resynchronizes the scrollbar after hidden-tab output. It preserves
+    // the current viewport row, so reveal/focus/wake recovery does not interrupt reading history.
     repaintAllRows() {
       try {
         term.refresh(0, Math.max(0, term.rows - 1));
