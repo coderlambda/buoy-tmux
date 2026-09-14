@@ -98,6 +98,15 @@ fn pick_local_port(sticky: Option<u16>) -> std::io::Result<u16> {
     free_local_port()
 }
 
+fn same_port_conflict(port: u16) -> String {
+    format!("local port {} is already in use; free it to restore same-port forwarding", port)
+}
+
+// Development servers may need time to compile a page before answering HEAD. A sub-second
+// response deadline mistakes that application latency for a broken SSH transport and disrupts
+// every browser/WebSocket connection when the otherwise healthy child is replaced.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Build the `ssh` argv for a forward. Split out from `spawn_tunnel` so the flag that actually
 /// decides the user-visible URL — `-L 127.0.0.1:<local>:localhost:<remote>` — can be asserted without
 /// spawning ssh. Returning the right local port from `ensure()` means nothing if the argv that gets
@@ -138,7 +147,7 @@ struct Tunnel {
     local_port: u16,
     remote_port: u16,
     pid: u32,
-    // Some when WE spawned it this run (lets us reap the whole process group via Child); None when
+    // Some when WE spawned it this run (lets us kill and reap it via Child); None when
     // ADOPTED from a previous run's orphan (we only know its pid, killed via `kill <pid>`).
     child: Option<Child>,
 }
@@ -147,14 +156,19 @@ impl Tunnel {
     fn kill(&mut self) {
         match self.child.as_mut() {
             Some(c) => { let _ = c.kill(); let _ = c.wait(); }
-            None if is_our_ssh_pid(self.pid, self.local_port, self.remote_port) => {
-                let _ = Command::new("kill").arg(self.pid.to_string()).status();
-                let deadline = Instant::now() + Duration::from_secs(1);
-                while is_our_ssh_pid(self.pid, self.local_port, self.remote_port) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(20));
+            None => {
+                // An adopted process can be stopped/unresponsive and never handle SIGTERM.
+                // Recheck ownership before escalation so the old listener releases its port,
+                // without signalling an unrelated process that has reused the recorded PID.
+                for signal in ["-TERM", "-KILL"] {
+                    if !is_our_ssh_pid(self.pid, self.local_port, self.remote_port) { break; }
+                    let _ = Command::new("kill").args([signal, &self.pid.to_string()]).status();
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    while is_our_ssh_pid(self.pid, self.local_port, self.remote_port) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
                 }
             }
-            None => {}
         }
     }
     // Alive if our Child hasn't exited, or (adopted) the pid is still one of our ssh -L procs.
@@ -174,12 +188,20 @@ pub fn probe_local_port(local_port: u16) -> bool {
 }
 
 fn probe_forward(local_port: u16, remote_port: u16, scheme: TunnelScheme) -> bool {
+    probe_forward_with_timeout(local_port, remote_port, scheme, PROBE_TIMEOUT)
+}
+
+fn probe_forward_with_timeout(local_port: u16, remote_port: u16, scheme: TunnelScheme, timeout: Duration) -> bool {
+    if timeout.is_zero() { return false; }
+    let deadline = Instant::now() + timeout;
     let addr = format!("127.0.0.1:{}", local_port);
     let stream = TcpStream::connect_timeout(
-        &addr.parse().unwrap(), Duration::from_millis(600));
+        &addr.parse().unwrap(), timeout.min(Duration::from_millis(600)));
     let mut s = match stream { Ok(s) => s, Err(_) => return false };
-    let _ = s.set_read_timeout(Some(Duration::from_millis(700)));
-    let _ = s.set_write_timeout(Some(Duration::from_millis(500)));
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() { return false; }
+    let _ = s.set_read_timeout(Some(remaining));
+    let _ = s.set_write_timeout(Some(remaining.min(Duration::from_millis(500))));
     if scheme == TunnelScheme::Https {
         // Reachability only: dev servers commonly use self-signed certificates. This handshake
         // carries no credentials/content; the browser still performs its normal certificate checks.
@@ -329,8 +351,8 @@ impl TunnelRegistry {
     }
 
     /// Ensure a tunnel exists for (session, remote_port); return the LOCAL port. Reuses a live one;
-    /// otherwise re-opens on the SAME local port this remote port was last forwarded on (see
-    /// `pick_local_port`), falling back to a fresh one only if that port is now taken.
+    /// otherwise re-opens on the remembered local port. A same-port mapping is pinned: a conflict
+    /// must not silently change URLs used by redirects and existing browser tabs.
     pub fn ensure(&self, session_id: &str, host: &str, remote_port: u16, base_args: &[String])
         -> Result<u16, String>
     {
@@ -354,7 +376,10 @@ impl TunnelRegistry {
         // NOTE: the dead tunnel above was just killed, so its old local port is free again — this is
         // exactly the reconnect case, and re-picking randomly here was the bug.
         let sticky = self.remembered_local(session_id, remote_port);
-        let local_port = pick_local_port(sticky).map_err(|e| e.to_string())?;
+        let local_port = if sticky == Some(remote_port) {
+            if !local_port_free(remote_port) { return Err(same_port_conflict(remote_port)); }
+            remote_port
+        } else { pick_local_port(sticky).map_err(|e| e.to_string())? };
         self.spawn_tunnel(session_id, host, local_port, remote_port, base_args)
     }
 
@@ -444,15 +469,25 @@ impl TunnelRegistry {
 
     fn ensure_ready_locked(&self, session_id: &str, host: &str, remote: u16, scheme: TunnelScheme, same: bool, base_args: &[String]) -> Result<u16, String> {
         if remote == 0 { return Err("invalid remote port".into()); }
+        // The persisted local==remote mapping records the same-port choice, including records
+        // written by older Buoy versions. Honor it for opens and automatic restores, not only '='.
+        let same = same || self.remembered_local(session_id, remote) == Some(remote);
         let previous = self.list(session_id).into_iter().find(|(rp, _)| *rp == remote).map(|(_, lp)| lp);
         if let Some(local) = previous {
-            if (!same || local == remote) && probe_forward(local, remote, scheme) {
+            // Retry transient failures before disrupting existing connections. Never hold the
+            // global registry lock during network I/O: other workspaces must remain responsive.
+            let healthy = (!same || local == remote) && wait_forward_ready(local, remote, scheme, PROBE_TIMEOUT, || {
+                self.by_session.lock().unwrap().get_mut(session_id)
+                    .and_then(|per| per.get_mut(&remote))
+                    .is_some_and(|tunnel| tunnel.alive())
+            }).is_ok();
+            if healthy {
                 self.set_scheme(session_id, remote, scheme);
                 return Ok(local);
             }
         }
         if same && previous != Some(remote) && !local_port_free(remote) {
-            return Err(format!("local port {} is already in use", remote));
+            return Err(same_port_conflict(remote));
         }
         // A remap can be tested beside the old forward. Only retire it after the replacement
         // works. Repairing on the same local port necessarily closes the stale child first.
@@ -580,11 +615,16 @@ fn is_our_ssh_pid(pid: u32, local: u16, remote: u16) -> bool {
 }
 
 fn wait_ready(tunnel: &mut Tunnel, scheme: TunnelScheme, timeout: Duration) -> Result<(), String> {
+    wait_forward_ready(tunnel.local_port, tunnel.remote_port, scheme, timeout, || tunnel.alive())
+}
+
+fn wait_forward_ready(local: u16, remote: u16, scheme: TunnelScheme, timeout: Duration, mut alive: impl FnMut() -> bool) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if !tunnel.alive() { return Err("SSH tunnel exited before it became ready. Check SSH access and local port availability.".into()); }
-        if probe_forward(tunnel.local_port, tunnel.remote_port, scheme) && tunnel.alive() { return Ok(()); }
-        if Instant::now() >= deadline { return Err(format!("Tunnel to remote port {} did not respond. Check that the remote service is running.", tunnel.remote_port)); }
+        if !alive() { return Err("SSH tunnel exited before it became ready. Check SSH access and local port availability.".into()); }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if probe_forward_with_timeout(local, remote, scheme, remaining.min(PROBE_TIMEOUT)) && alive() { return Ok(()); }
+        if Instant::now() >= deadline { return Err(format!("Tunnel to remote port {} did not respond. Check that the remote service is running.", remote)); }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -646,9 +686,75 @@ mod tests {
             drop(stream);
         });
         let mut tunnel = placeholder(port, 3000);
+        let start = Instant::now();
         assert!(wait_ready(&mut tunnel, TunnelScheme::Http, Duration::from_millis(200)).is_err());
+        let elapsed = start.elapsed();
         tunnel.kill();
         worker.join().unwrap();
+        assert!(elapsed < Duration::from_millis(600), "probe must respect the readiness budget: {elapsed:?}");
+    }
+
+    #[test]
+    fn same_port_choice_survives_restart_and_conflicts_in_every_reconnect_path() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let path = tmp_store("same_port_conflict");
+        let original = TunnelRegistry::with_store(path.clone());
+        original.remember("pinned", port, port, 0);
+        drop(original);
+        let reg = TunnelRegistry::with_store(path.clone());
+        let error = reg.ensure("pinned", "unused", port, &[]).unwrap_err();
+        assert!(error.contains("already in use"), "{error}");
+        let error = reg.ensure_ready("pinned", "unused", port, TunnelScheme::Http, &[]).unwrap_err();
+        assert!(error.contains("already in use"), "{error}");
+        assert!(reg.restore_ready_if("pinned", "unused", &[], || true).is_empty());
+        assert!(reg.list("pinned").is_empty());
+        assert_eq!(reg.remembered_local("pinned", port), Some(port));
+        reg.forget_session("pinned");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn adopted_tunnel_cleanup_does_not_signal_an_unrelated_process() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut stale = Tunnel { local_port: 3000, remote_port: 3000, pid: child.id(), child: None };
+        stale.kill();
+        let alive = child.try_wait().unwrap().is_none();
+        let _ = child.kill(); let _ = child.wait();
+        assert!(alive, "a reused PID without our ssh forwarding arguments must be left alone");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn slow_readiness_does_not_hold_the_global_registry_lock() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (started, wait_started) = std::sync::mpsc::channel();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 256]; let _ = stream.read(&mut request);
+            started.send(()).unwrap();
+            let _ = wait_release.recv_timeout(Duration::from_secs(2));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+        });
+        let reg = Arc::new(TunnelRegistry::new());
+        reg.install("slow", placeholder(port, port));
+        let checking = reg.clone();
+        let check = std::thread::spawn(move || checking.force_same_port("slow", "unused", port, &[]));
+        wait_started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (finished, wait_finished) = std::sync::mpsc::channel();
+        let other = reg.clone();
+        let unrelated = std::thread::spawn(move || { other.close_session("other"); let _ = finished.send(()); });
+        let responsive = wait_finished.recv_timeout(Duration::from_millis(500)).is_ok();
+        release.send(()).unwrap();
+        let result = check.join().unwrap();
+        unrelated.join().unwrap();
+        server.join().unwrap();
+        reg.forget_session("slow");
+        assert!(responsive, "an unrelated workspace must not wait for the slow network probe");
+        assert_eq!(result.unwrap(), port);
     }
 
     #[test]
