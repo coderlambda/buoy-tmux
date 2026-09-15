@@ -461,7 +461,7 @@ function ensureTab(v: View, winId: string): AppTab {
   const existing = v.tabs.get(winId);
   if (existing) return existing;
   let tab: AppTab;
-  const { provider: linkProvider, linkHandler } = makeLinkProvider(() => tab.content.term, v.meta);
+  const { provider: linkProvider, linkHandler } = makeLinkProvider(() => tab.content.term, v.meta, winId);
   const ctx = {
     searchHost: requiredElement('terminal-search'),
     canFocus: () => !shouldDropInput(v),
@@ -590,14 +590,19 @@ function acknowledgeTerminalInteraction(v: View | null | undefined, tab: AppTab 
 
 // Open a file-viewer tab for a clicked path (§16). App-local tab (no tmux window): synthetic id,
 // tmux commands are gated off it. Fetches its own content on mount.
-function openViewer(sessionId: string, path: string): void {
-  const v = views.get(sessionId) || (activeId ? views.get(activeId) : undefined);
+function openViewer(sessionId: string, path: string, sourceWinId: string): void {
+  const v = views.get(sessionId);
   if (!v) return;
   const winId = 'view:' + (++_viewerSeq);
   const ctx = { setStatus: (m: string) => setStatus(m) };
   const content = registry.createTabContent('fileviewer',
     { id: v.meta.id, path, api }, ctx);
   const tab: AppTab = { winId, title: baseName(path), content, mounted: false, viewer: true };
+  const order = tabDisplayOrder(v);
+  const sourceIndex = order.indexOf(sourceWinId);
+  order.splice(sourceIndex < 0 ? order.length : sourceIndex + 1, 0, winId);
+  // Keep previews in the live order. Only real tmux ids are persisted on reorder.
+  v.savedTabOrder = order;
   v.tabs.set(winId, tab);
   v.activeWindow = winId;
   if (v.meta.id === activeId) { showActiveTab(v); renderTabs(v); }
@@ -658,9 +663,9 @@ function chooseOpen(sessionId: string, url: string): void {
 
 // §21: Shift+Cmd chooser for a remote FILE path (from an OSC 8 file:// link) — preview in-app or
 // copy the absolute path. The path is on the REMOTE host, so there's no "open locally" option.
-function chooseOpenFile(sessionId: string, path: string): void {
+function chooseOpenFile(sessionId: string, path: string, sourceWinId: string): void {
   showChooser(path, [
-    ['Preview in app', () => openViewer(sessionId, path)],
+    ['Preview in app', () => openViewer(sessionId, path, sourceWinId)],
     ['Copy path', () => api.copyText(path)],
   ]);
 }
@@ -680,7 +685,8 @@ function activeTab(v: View): AppTab | null {
 function makeLinkProvider(
   getTerm: () => XtermTerminal | undefined,
   meta: SessionMeta,
-): { provider: XtermLinkProvider; linkHandler: { activate(event: MouseEvent, uri: string): void } } {
+  sourceWinId: string,
+): { provider: XtermLinkProvider; linkHandler: { allowNonHttpProtocols: boolean; activate(event: MouseEvent, uri: string): void } } {
   const ctx: LinkContext = {
     meta,
     openExternal: (url: string) => void api.openExternal(url),
@@ -693,7 +699,7 @@ function makeLinkProvider(
     openViewer: (path: string) => {
       const v = views.get(meta.id);
       const abs = v && v.linkMap.get(String(path).trim());
-      openViewer(meta.id, abs || path);
+      openViewer(meta.id, abs || path, sourceWinId);
     },
     // §18: is this URL a remote-loopback URL (needs an ssh -L tunnel to reach)?
     isLoopback: (url: string) => isLoopbackUrl(url),
@@ -745,14 +751,18 @@ function makeLinkProvider(
   //             offers a chooser (preview / copy path).
   //   else    -> openUrlSmart (loopback tunnel / browser / URL chooser), unchanged.
   const linkHandler = {
+    // xterm otherwise filters file:// before activate can route it to the in-app viewer.
+    // Restrict other schemes before even offering the URL chooser.
+    allowNonHttpProtocols: true,
     activate(event: MouseEvent, uri: string) {
       const mods = { shift: !!(event && event.shiftKey), meta: !!(event && (event.metaKey || event.ctrlKey)), alt: !!(event && event.altKey) };
       const filePath = DTBuiltinPlugins.parseFileUri(uri);
       if (filePath) {
-        if (mods.shift) chooseOpenFile(meta.id, filePath);
-        else openViewer(meta.id, filePath);
+        if (mods.shift) chooseOpenFile(meta.id, filePath, sourceWinId);
+        else openViewer(meta.id, filePath, sourceWinId);
         return;
       }
+      if (!/^(https?|ftp):\/\//i.test(uri)) { setStatus('refused to open: ' + uri); return; }
       DTBuiltinPlugins.openUrlSmart(uri, ctx, mods);
     },
   };
@@ -2077,7 +2087,7 @@ function statusLine(v: View, state: SessionState): string {
 // events (each with the full window `order`). The renderer just mirrors them into tabs — it
 // holds no pane/topology state of its own.
 const tabsEl = requiredElement<HTMLElement>('tabs');
-api.onWindow(({ id, action, window, name, order }) => {
+api.onWindow(({ id, action, window, name, order, afterClose }) => {
   dbg('onWindow id=' + id + ' action=' + action + ' window=' + window + ' order=' + JSON.stringify(order));
   const v = views.get(id);
   if (!v) { dbg('onWindow: NO VIEW for id=' + id); return; }
@@ -2085,14 +2095,21 @@ api.onWindow(({ id, action, window, name, order }) => {
     ensureTab(v, window);
     if (!v.activeWindow) v.activeWindow = window;   // first window = active until told otherwise
   } else if (action === 'close') {
-    const t = v.tabs.get(window);
-    if (t) { try { t.content.dispose(); } catch (_) {} v.tabs.delete(window); }
-    if (v.activeWindow === window) { const first = v.tabs.keys().next(); v.activeWindow = first.done ? null : first.value; if (id === activeId) showActiveTab(v); }
+    removeTab(v, window);
     // Closing an unread tab can clear the session-level rollup dot.
     renderSidebar();
   } else if (action === 'rename') {
     ensureTab(v, window).title = name || window;
   } else if (action === 'active') {
+    // Closing a tmux window can select a different neighbour from our custom strip order.
+    // The preceding close events already chose the visible neighbour (possibly a preview).
+    // Keep that choice and synchronize tmux, without fighting unrelated external tab switches.
+    if (afterClose && v.activeWindow && v.tabs.has(v.activeWindow)) {
+      if (isWindowTab(v.activeWindow) && v.activeWindow !== window) api.tabSelect(id, v.activeWindow);
+      if (Array.isArray(order)) v.tabOrder = order;
+      if (id === activeId) renderTabs(v);
+      return;
+    }
     // tmux switched the active window (e.g. after opening a new tab). Follow it so the shown tab
     // matches where input goes. Lazy-load the newly-focused tab's scrollback on first view.
     ensureTab(v, window);
@@ -2205,10 +2222,9 @@ function reorderTabByIndex(v: View, from: number, to: number): void {
   const [moved] = order.splice(from, 1);
   if (!moved) return;
   order.splice(to, 0, moved);
-  // Persist + track only real tmux-window ids (viewer tabs are app-local, never restored), so the
-  // in-memory savedTabOrder can't diverge from what's stored.
+  // Viewer positions belong to this app session; only real tmux ids survive an app restart.
   const windowOrder = order.filter(isWindowTab);
-  v.savedTabOrder = windowOrder;
+  v.savedTabOrder = order;
   renderTabs(v);
   api.setTabPrefs(v.meta.id, windowOrder, null).catch(() => {});
 }
@@ -2224,8 +2240,22 @@ function switchTab(v: View, winId: string, userInitiated = false): void {
   if (v.activeWindow === winId) return;
   v.activeWindow = winId;
   if (isWindowTab(winId)) { api.tabSelect(v.meta.id, winId); rememberLastTab(v, winId); }
-  showActiveTab(v);
-  renderTabs(v);
+  if (v.meta.id === activeId) { showActiveTab(v); renderTabs(v); }
+}
+
+function removeTab(v: View, winId: string): void {
+  const order = tabDisplayOrder(v);
+  const index = order.indexOf(winId);
+  const neighbour = order[index - 1] || order[index + 1];
+  const tab = v.tabs.get(winId);
+  if (tab) { try { tab.content.dispose(); } catch (_) {} v.tabs.delete(winId); }
+  v.savedTabOrder = v.savedTabOrder.filter(id => id !== winId);
+  if (v.activeWindow !== winId) return;
+  if (neighbour) switchTab(v, neighbour);
+  else {
+    v.activeWindow = null;
+    if (v.meta.id === activeId) showActiveTab(v);
+  }
 }
 
 // §20: persist a project's last-active tab so it's restored when the project is reopened.
@@ -2259,13 +2289,7 @@ async function closeTab(v: View, winId: string): Promise<void> {
     }
     return;
   }
-  const t = v.tabs.get(winId);
-  if (t) { try { t.content.dispose(); } catch (_) {} v.tabs.delete(winId); }
-  if (v.activeWindow === winId) {
-    const first = v.tabs.keys().next();
-    v.activeWindow = first.done ? null : first.value;
-    if (v.meta.id === activeId) showActiveTab(v);
-  }
+  removeTab(v, winId);
   if (v.meta.id === activeId) renderTabs(v);
 }
 api.onIntentionalExit(({ id }) => {

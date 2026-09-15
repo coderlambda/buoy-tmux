@@ -41,7 +41,7 @@ pub enum BackendEvent {
     WindowAdd { window: String, order: Vec<String> },
     WindowClose { window: String, order: Vec<String> },
     WindowRename { window: String, name: String },
-    WindowActive { window: String, order: Vec<String> },
+    WindowActive { window: String, order: Vec<String>, after_close: bool },
     /// Latest active-pane cwd/command per window. The session layer persists this without exposing
     /// it as a renderer event; it is used only if the tmux server later disappears.
     RecoverySnapshot { windows: Vec<RecoveryWindow> },
@@ -511,7 +511,10 @@ impl Inner {
         }
         if diff.active_changed {
             if let Some(active) = &diff.active {
-                g.emit(BackendEvent::WindowActive { window: active.clone(), order: order.clone() });
+                // Let the UI retain its own neighbour after a close: its order also includes
+                // app-local previews and user-reordered tabs. A newly-created window still wins.
+                let after_close = !diff.removed.is_empty() && !diff.added.contains(active);
+                g.emit(BackendEvent::WindowActive { window: active.clone(), order: order.clone(), after_close });
             }
         }
         // Flush output buffered before its window was known.
@@ -924,6 +927,35 @@ mod tests {
 
     fn sent_str(sent: &Arc<Mutex<Vec<u8>>>) -> String {
         String::from_utf8_lossy(&sent.lock().unwrap()).into_owned()
+    }
+
+    #[test]
+    fn closing_topology_marks_only_fallback_selection_and_emits_closes_first() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let (inner, _) = test_inner_with_sink(Arc::new(move |event| sink.lock().unwrap().push(event)));
+        let row = |n, active| format!("@{n}\t%{n}\t1\t{active}\tzsh\t/tmp\tzsh");
+        Inner::apply_topology(&inner, vec![row(0, 0), row(1, 1), row(2, 0)]);
+        assert!(events.lock().unwrap().iter().any(|event| matches!(event,
+            BackendEvent::WindowActive { after_close: false, .. })));
+        events.lock().unwrap().clear();
+        Inner::apply_topology(&inner, vec![row(0, 1), row(2, 0)]);
+        let captured = events.lock().unwrap();
+        let close = captured.iter().position(|event| matches!(event,
+            BackendEvent::WindowClose { window, .. } if window == "@1")).unwrap();
+        let active = captured.iter().position(|event| matches!(event,
+            BackendEvent::WindowActive { window, after_close: true, .. } if window == "@0")).unwrap();
+        assert!(close < active, "renderer chooses the neighbour before receiving tmux's fallback");
+        drop(captured);
+        events.lock().unwrap().clear();
+        Inner::apply_topology(&inner, vec![row(0, 0), row(2, 1)]);
+        assert!(events.lock().unwrap().iter().any(|event| matches!(event,
+            BackendEvent::WindowActive { after_close: false, .. })));
+        events.lock().unwrap().clear();
+        // Replacing a window with a newly created one should reveal the new window.
+        Inner::apply_topology(&inner, vec![row(0, 0), row(3, 1)]);
+        assert!(events.lock().unwrap().iter().any(|event| matches!(event,
+            BackendEvent::WindowActive { window, after_close: false, .. } if window == "@3")));
     }
 
     // REGRESSION: "connected but can't input" after a slow reconnect. mark_ready can fire (from its

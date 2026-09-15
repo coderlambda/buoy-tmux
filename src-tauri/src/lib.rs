@@ -178,6 +178,8 @@ struct WindowPayload {
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     order: Option<Vec<String>>,
+    #[serde(rename = "afterClose", skip_serializing_if = "Option::is_none")]
+    after_close: Option<bool>,
 }
 
 // --- helpers -------------------------------------------------------------------------------
@@ -206,19 +208,19 @@ fn emit_backend_event(app: &AppHandle, id: &str, ev: BackendEvent) {
         }
         BackendEvent::WindowAdd { window, order } => {
             let _ = app.emit("session:window", WindowPayload {
-                id: id.into(), action: "add".into(), window, name: None, order: Some(order) });
+                id: id.into(), action: "add".into(), window, name: None, order: Some(order), after_close: None });
         }
         BackendEvent::WindowClose { window, order } => {
             let _ = app.emit("session:window", WindowPayload {
-                id: id.into(), action: "close".into(), window, name: None, order: Some(order) });
+                id: id.into(), action: "close".into(), window, name: None, order: Some(order), after_close: None });
         }
         BackendEvent::WindowRename { window, name } => {
             let _ = app.emit("session:window", WindowPayload {
-                id: id.into(), action: "rename".into(), window, name: Some(name), order: None });
+                id: id.into(), action: "rename".into(), window, name: Some(name), order: None, after_close: None });
         }
-        BackendEvent::WindowActive { window, order } => {
+        BackendEvent::WindowActive { window, order, after_close } => {
             let _ = app.emit("session:window", WindowPayload {
-                id: id.into(), action: "active".into(), window, name: None, order: Some(order) });
+                id: id.into(), action: "active".into(), window, name: None, order: Some(order), after_close: Some(after_close) });
         }
         BackendEvent::RecoverySnapshot { windows } => {
             if let Some(state) = app.try_state::<AppState>() {
