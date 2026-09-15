@@ -26,6 +26,7 @@ export const config: WebdriverIO.Config = {
     './test/gui-compact-ui.ts',
     './test/gui-theme.ts',
     './test/gui-tunnel-reconnect.ts',
+    './test/gui-preview-tabs.ts',
   ],
   maxInstances: 1,
   capabilities: [{

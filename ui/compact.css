@@ -16,6 +16,11 @@ button:focus-visible, [role=button]:focus-visible { outline:2px solid var(--acce
   width:27px; height:27px; padding:0; margin:0; border:0; border-radius:4px; color:var(--muted); background:transparent; }
 .icon-button:hover { color:var(--fg); background:var(--hover); }
 .icon-button.primary { background:var(--accent); color:var(--accent-fg); }
+.text-button, dialog .text-button { display:inline-flex; flex:none; align-items:center; justify-content:center;
+  min-height:27px; padding:4px 9px; margin:0; border:1px solid var(--line); border-radius:4px;
+  color:var(--fg); background:transparent; white-space:nowrap; }
+.text-button:hover { background:var(--hover); }
+.text-button.primary, .text-button.primary:hover { background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
 .icon-button.danger, .icon-button.danger:hover { color:var(--danger); }
 .icon-button.danger-fill { color:var(--panel); background:var(--danger); }
 .icon-button[aria-pressed=true] { background:var(--tint); color:var(--accent); }
@@ -171,11 +176,11 @@ dialog .discovered-session.selected { background:var(--tint); }
 .recovery-list { margin:12px 0 0; padding:0; list-style:none; }
 .recovery-list li { padding:8px 0; border-top:1px solid var(--line); }
 .recovery-list small { display:block; color:var(--muted); overflow-wrap:anywhere; }
-.fv-bar { padding:5px 12px; gap:6px; background:var(--bg); border-color:var(--line); }
-.fv-name { font-size:11px; font-weight:500; }
-.fv-meta { font-size:11px; }
-.fv-bar button { width:27px; height:27px; padding:0; border:0; background:transparent; color:var(--muted); }
-.fv-bar button:hover { background:var(--hover); color:var(--fg); }
+.fv-bar { padding:5px 12px; gap:6px; flex-wrap:wrap; background:var(--bg); border-color:var(--line); }
+.fv-name { flex:1; font-size:11px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.fv-meta { flex:none; font-size:11px; white-space:nowrap; }
+.fv-bar .text-button { width:auto; height:auto; padding:4px 9px; }
+.fv-script-status { color:var(--success); font-size:11px; white-space:nowrap; }
 .fv-md h1,.fv-md h2,.fv-md h3,.fv-md table.mdtable td,.fv-md table.mdtable th { border-color:var(--line); }
 .fv-body { padding:20px; }
 .fv-err { color:var(--danger); }

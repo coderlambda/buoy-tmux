@@ -22,6 +22,8 @@ interface CreateResult {
 }
 
 interface TestBackend {
+  files?: Record<string, { data_b64: string; size: number; truncated: boolean }>;
+  scriptedPreviewUrl?: string;
   delay?: Record<string, number>;
   reject?: Record<string, string>;
   createSessionResult?: CreateResult;
@@ -43,6 +45,7 @@ interface TestFixture {
 }
 
 interface CommandArgs {
+  path?: string;
   theme?: 'dark' | 'light' | null;
   remote?: number;
   meta?: CreateResult;
@@ -241,8 +244,10 @@ interface Window {
       case 'list_tunnels': return tunnelSnapshot;
       case 'list_hosts': return clone(backend.hosts ?? []);
       case 'read_remote_file':
-      case 'save_file':
+        return clone(backend.files?.[args.path ?? ''] ?? {});
       case 'enable_html_scripts':
+        return { url: backend.scriptedPreviewUrl ?? 'buoyhtml://localhost/test-preview' };
+      case 'save_file':
       case 'open_forwarded_url':
         return {};
       case 'force_forward': {

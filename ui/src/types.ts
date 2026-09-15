@@ -114,6 +114,8 @@ export interface WindowEvent {
   window: string;
   name?: string;
   order?: string[];
+  /** tmux's fallback selection following window removal in the same topology update. */
+  afterClose?: boolean;
 }
 
 export interface TerminalAPI {

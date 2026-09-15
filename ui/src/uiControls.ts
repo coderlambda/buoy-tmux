@@ -46,6 +46,15 @@ export function iconButton(name: IconName, label: string, action?: () => unknown
   return button;
 }
 
+export function textButton(label: string, action?: () => unknown): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'text-button';
+  button.textContent = label;
+  if (action) button.onclick = () => { void action(); };
+  return button;
+}
+
 /** Native dialogs provide focus containment, Escape and focus restoration. */
 export function openPanel(title: string, help = '') {
   const dialog = document.createElement('dialog');
@@ -75,7 +84,7 @@ export function openPanel(title: string, help = '') {
   return { dialog, content };
 }
 
-export function confirmAction(title: string, detail: string, action: string, danger = false, content?: HTMLElement): Promise<boolean> {
+export function confirmAction(title: string, detail: string, action: string, danger = false, content?: HTMLElement, buttonStyle: 'icon' | 'text' = 'icon'): Promise<boolean> {
   const panel = openPanel(title);
   const description = document.createElement('p');
   description.className = 'confirm-detail';
@@ -84,8 +93,12 @@ export function confirmAction(title: string, detail: string, action: string, dan
   if (content) panel.content.append(content);
   const footer = document.createElement('footer');
   footer.className = 'dialog-footer';
-  const cancel = iconButton('x', 'Cancel', () => panel.dialog.close());
-  const accept = iconButton(danger ? 'delete' : 'restore', action, () => panel.dialog.close('accept'));
+  const cancel = buttonStyle === 'text'
+    ? textButton('Cancel', () => panel.dialog.close())
+    : iconButton('x', 'Cancel', () => panel.dialog.close());
+  const accept = buttonStyle === 'text'
+    ? textButton(action, () => panel.dialog.close('accept'))
+    : iconButton(danger ? 'delete' : 'restore', action, () => panel.dialog.close('accept'));
   accept.classList.add(danger ? 'danger-fill' : 'primary');
   accept.dataset.confirm = 'accept';
   footer.append(cancel, accept);

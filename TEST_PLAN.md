@@ -297,6 +297,20 @@ cd src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --n
   simulated slow writes and echoed output. Verify event-loop responsiveness, search/tab controls,
   exact bytes and target, disconnect/disposal cancellation, and visible failure handling.
 
+## Preview controls and tab neighbours
+
+- `gui-preview-tabs`: click OSC 8 file links and detected plain paths in the native WebView; check insertion immediately
+  right of the source, including custom order, repeated opens, and a delayed chooser. Drag previews
+  among terminals without losing their positions or persisting app-local ids.
+- Close active previews and terminal windows into their left neighbour (right for the first tab),
+  preserving focus on background close and when tmux reports a different fallback window.
+- Verify visible English JavaScript controls and confirmation, cancellation, pending/failure/retry,
+  per-preview opt-in, rejection of unsupported link schemes, and closing a preview before a failed
+  file read returns.
+- `control_backend::closing_topology_marks_only_fallback_selection_and_emits_closes_first` checks
+  actual topology reconciliation: close events precede marked fallback selection, while normal
+  switches and newly created windows retain their usual selection behavior.
+
 ## Manual / deferred (documented, not run here)
 
 - mosh / Eternal Terminal transports and their Milestone-0 characterization (TC-M0 in the
