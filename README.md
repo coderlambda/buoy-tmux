@@ -114,6 +114,10 @@ sidebar.
 - Drag desktop files or folders onto a connected terminal to upload them into that tab's current
   directory over SCP (local tmux tabs copy locally). Folder structure and empty directories are kept;
   progress, cancellation, and per-item results appear in the window.
+- By default, successful uploads are added to the original terminal input without pressing Enter.
+  Supported image paths become attachments in Codex/Claude Code; other files and folders become
+  path references. The paperclip in the sidebar switches between **Upload & attach** and
+  **Upload only**. Paths are not inserted if the original terminal program has changed.
 - Existing names are skipped, including whole folders; files are never merged into an existing
   folder. Symbolic links and special files are skipped and reported. Preview tabs and standalone
   shells without tmux are not upload targets.

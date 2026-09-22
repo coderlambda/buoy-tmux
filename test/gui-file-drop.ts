@@ -17,7 +17,7 @@ async function fixture(backend = {}, mode: 'control' | 'local' = 'control') {
 const completed = () => $(`${panel} [aria-label="Close upload result"]`).waitForDisplayed();
 
 describe('Tauri UI: desktop file and folder drops', () => {
-  beforeEach(async () => { await browser.setWindowSize(1100, 700); await fixture(); });
+  beforeEach(async () => { await browser.setWindowSize(1100, 700); await js("localStorage.removeItem('buoy.fileDropAction')"); await fixture(); });
 
   it('shows the target during drag hover and dismisses on leave without uploading', async () => {
     await fire('files:drop', { kind: 'enter', count: 2 });
@@ -33,7 +33,7 @@ describe('Tauri UI: desktop file and folder drops', () => {
     await drop('drop-one', 2);
     await $('#tabs .tlabel[title^="First"]').click();
     await fire('files:progress', { token: 'drop-one', directory: '/work/中文 project', item: 'folder/file.txt', completed: 0, count: 2, sent: 512, total: 1024 });
-    assert.deepEqual((await call('upload_dropped_files'))[0][1], { id: 's1', win: '@1', token: 'drop-one' });
+    assert.deepEqual((await call('upload_dropped_files'))[0][1], { id: 's1', win: '@1', token: 'drop-one', attach: true });
     assert.match(await $(`${panel} .upload-detail`).getText(), /folder\/file.txt/);
     assert.equal(Number(await $(`${panel} progress`).getAttribute('value')), .5);
     await fire('files:progress', { token: 'stale', directory: '/wrong', item: 'wrong', completed: 0, count: 1, sent: 0, total: 1 });
@@ -89,6 +89,31 @@ describe('Tauri UI: desktop file and folder drops', () => {
     await fixture(); await $('#show-theme').click(); await drop();
     assert.equal((await call('upload_dropped_files')).length, 0);
     await $('.action-dialog .dialog-close').click();
+  });
+
+  it('switches between persisted upload-only and attachment modes', async () => {
+    await $('#file-drop-options').click();
+    await $('[data-drop-action="upload"]').click();
+    await fire('files:drop', { kind: 'enter', count: 1 });
+    assert.match(await $('.file-drop-overlay').getText(), /Drop files or folders to upload/);
+    await drop(); await completed();
+    assert.equal((await call('upload_dropped_files'))[0][1].attach, false);
+    await $('#file-drop-options').click();
+    await $('[data-drop-action="attach"]').click();
+    await drop('attach-next'); await completed();
+    assert.equal((await call('upload_dropped_files'))[1][1].attach, true);
+  });
+
+  it('reports inserted paths and attachment failures without claiming skipped files were attached', async () => {
+    await fixture({ uploadReport: { directory: '/work', cancelled: false, warnings: [], items: [
+      { name: 'image.png', status: 'uploaded', detail: '', inserted: true },
+      { name: 'old.png', status: 'skipped', detail: 'Already exists.', inserted: false },
+      { name: 'late.png', status: 'uploaded', detail: 'Not added to terminal: program changed', inserted: false },
+    ] } });
+    await drop('result', 3); await completed();
+    assert.match(await $(`${panel} .upload-detail`).getText(), /1 added to terminal/);
+    assert.match(await $(`${panel} .upload-results`).getText(), /program changed/);
+    assert.equal((await call('session_input')).length, 0);
   });
 
   it('does not treat a web page drop or an empty native drop as a local file grant', async () => {

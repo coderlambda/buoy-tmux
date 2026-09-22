@@ -332,3 +332,142 @@ fn concurrent_name_created_during_transfer_is_not_replaced() {
     assert_eq!(report.items[0].status, "skipped", "{report:?}");
     assert_eq!(fs::read_to_string(f.target().join("race")).unwrap(), "keep");
 }
+
+// This process owns a real raw terminal, enables bracketed paste and records exactly the input
+// delivered by tmux. It never executes pasted text, and remains alive so recipient checks are real.
+fn start_receiver(f: &Fixture, suffix: &str) -> PathBuf {
+    let output = f.root.join(format!("received-{suffix}"));
+    let script = f.root.join(format!("receive-{suffix}.py"));
+    fs::write(
+        &script,
+        r#"import os, sys, tty
+from pathlib import Path
+tty.setraw(0)
+os.write(1, b'\x1b[?2004h')
+path = Path(sys.argv[1])
+path.touch()
+with path.open('ab', buffering=0) as out:
+    while True:
+        out.write(os.read(0, 65536))
+"#,
+    )
+    .unwrap();
+    let python = Command::new("which").arg("python3").output().unwrap();
+    let python = String::from_utf8(python.stdout).unwrap().trim().to_string();
+    f.tmux(&[
+        "respawn-pane",
+        "-k",
+        "-t",
+        "@1",
+        &python,
+        script.to_str().unwrap(),
+        output.to_str().unwrap(),
+    ]);
+    for _ in 0..100 {
+        if output.exists() {
+            return output;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("receiver did not start");
+}
+
+#[test]
+fn attachments_use_separate_bracketed_pastes_and_never_submit_or_reuse_collisions() {
+    let f = Fixture::new(false);
+    let received = start_receiver(&f, "original");
+    let paths = ["first 中文 image.png", "second'image.png", "existing.png"]
+        .map(|name| f.root.join("input").join(name));
+    for path in &paths {
+        fs::write(path, b"upload payload").unwrap();
+    }
+    fs::write(f.target().join("existing.png"), b"old content").unwrap();
+    let report = file_upload::upload_with_attachment(
+        &f.meta,
+        "@1",
+        "attach",
+        &paths,
+        Arc::new(Cancellation::default()),
+        &[],
+        true,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        report.items.iter().filter(|i| i.inserted).count(),
+        2,
+        "{report:?}"
+    );
+    assert_eq!(report.items[2].status, "skipped");
+    let received = fs::read(received).unwrap();
+    let text = String::from_utf8(received).unwrap();
+    assert_eq!(text.matches("\x1b[200~").count(), 2, "{text:?}");
+    assert_eq!(text.matches("\x1b[201~").count(), 2, "{text:?}");
+    assert!(text.contains("first\\ 中文\\ image.png"), "{text:?}");
+    assert!(text.contains("second\\'image.png"), "{text:?}");
+    assert!(!text.contains("existing.png"));
+    assert!(!text.contains(['\r', '\n']), "must never submit: {text:?}");
+    assert_eq!(
+        fs::read(f.target().join("existing.png")).unwrap(),
+        b"old content"
+    );
+}
+
+#[test]
+fn attachments_do_not_reach_a_replaced_program_or_pane() {
+    let f = Fixture::new(false);
+    start_receiver(&f, "before");
+    let source = f.root.join("input/image.png");
+    fs::write(&source, vec![1u8; 100_000]).unwrap();
+    let mut changed = false;
+    let mut after = PathBuf::new();
+    let report = file_upload::upload_with_attachment(
+        &f.meta,
+        "@1",
+        "attach",
+        &[source],
+        Arc::new(Cancellation::default()),
+        &[],
+        true,
+        |progress| {
+            if progress.phase == "upload" && progress.sent > 0 && !changed {
+                changed = true;
+                after = start_receiver(&f, "after");
+            }
+        },
+    )
+    .unwrap();
+    assert!(changed);
+    assert_eq!(report.items[0].status, "uploaded");
+    assert!(!report.items[0].inserted);
+    assert!(report.items[0].detail.contains("changed"), "{report:?}");
+    assert!(fs::read(after).unwrap().is_empty());
+}
+
+#[test]
+fn cancelled_upload_never_inserts_even_completed_files() {
+    let f = Fixture::new(false);
+    let received = start_receiver(&f, "cancel");
+    let source = f.root.join("input/image.png");
+    fs::write(&source, b"payload").unwrap();
+    let cancel = Arc::new(Cancellation::default());
+    let report = file_upload::upload_with_attachment(
+        &f.meta,
+        "@1",
+        "attach",
+        &[source],
+        cancel.clone(),
+        &[],
+        true,
+        |progress| {
+            if progress.phase == "attach" {
+                cancel.cancel();
+            }
+        },
+    )
+    .unwrap();
+    assert!(report.cancelled);
+    assert_eq!(report.items[0].status, "uploaded");
+    assert!(!report.items[0].inserted);
+    assert!(fs::read(received).unwrap().is_empty());
+}

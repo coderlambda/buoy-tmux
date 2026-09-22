@@ -218,3 +218,5 @@ dialog .discovered-session.selected { background:var(--tint); }
 .file-upload-panel progress::-webkit-progress-bar { background:var(--line); border-radius:3px; }
 .file-upload-panel progress::-webkit-progress-value { background:var(--accent); border-radius:3px; }
 .file-upload-panel progress::-moz-progress-bar { background:var(--accent); border-radius:3px; }
+.drop-action-choices { display:flex; gap:8px; }
+.drop-action-choices [aria-pressed="true"] { color:var(--accent); border-color:var(--accent); background:color-mix(in srgb, var(--accent) 15%, var(--surface)); }

@@ -21,7 +21,7 @@ function on<T>(event: string, cb: (payload: T) => void): void {
 }
 
 export const terminalAPI: TerminalAPI = {
-  uploadDroppedFiles: (id, win, token) => invoke('upload_dropped_files', { id, win, token }),
+  uploadDroppedFiles: (id, win, token, attach) => invoke('upload_dropped_files', { id, win, token, attach }),
   cancelFileUpload: (token) => invoke('cancel_file_upload', { token }),
   onFileDrop: cb => on('files:drop', cb),
   onUploadProgress: cb => on('files:progress', cb),

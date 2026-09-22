@@ -125,12 +125,15 @@ pub struct Progress {
     pub total: u64,
     pub completed: usize,
     pub count: usize,
+    pub phase: &'static str,
 }
 #[derive(Debug, Serialize)]
 pub struct ItemResult {
     pub name: String,
     pub status: String,
     pub detail: String,
+    // Delivery to the terminal, not a claim that the foreground CLI accepted an attachment.
+    pub inserted: bool,
 }
 #[derive(Debug, Serialize)]
 pub struct UploadReport {
@@ -323,12 +326,41 @@ fn line(reader: &mut impl BufRead) -> Result<String> {
     String::from_utf8(data).map_err(|_| "Invalid file-transfer response.".into())
 }
 
-pub fn resolve_directory(
+#[derive(Debug)]
+struct Target {
+    directory: String,
+    pane: String,
+    identity: String,
+}
+
+// The foreground process group changes when an agent exits back to its shell. Include its
+// start time as well as the pane/server identity so a replacement cannot inherit a pending drop.
+fn recipient_script(tmux: &str, socket: &str) -> String {
+    format!(
+        r#"
+tm() {{ {tmux} -u -L {socket} "$@"; }}
+recipient() {{
+  info=$(tm display-message -p -t "$pane" '#{{window_id}}:#{{pane_id}}:#{{pane_pid}}:#{{pid}}:#{{pane_current_command}}:#{{pane_in_mode}}') || return 1
+  pid=$(tm display-message -p -t "$pane" '#{{pane_pid}}') || return 1
+  group=$(ps -o tpgid= -p "$pid" | tr -d ' ') || return 1
+  case "$group" in ''|*[!0-9]*|0) return 1 ;; esac
+  process=$(ps -o pid=,lstart=,comm= -p "$group") || return 1
+  [ -n "$process" ] || return 1
+  printf '%s\n%s' "$info" "$process"
+}}
+"#,
+        tmux = quote(tmux),
+        socket = quote(socket)
+    )
+}
+
+fn resolve_target(
     meta: &SessionMeta,
     win: &str,
     cancel: &Arc<Cancellation>,
     extra: &[String],
-) -> Result<String> {
+    attach: bool,
+) -> Result<Target> {
     validate_session(&meta.session).map_err(|e| e.to_string())?;
     if meta.mode == "local" {
         return Err("File drops require a tmux terminal tab.".into());
@@ -347,13 +379,21 @@ pub fn resolve_directory(
     });
     let script = format!(
         r#"set -eu
+{recipient}
 rows=$({tmux} -u -L {socket} list-panes -s -t {session} -F '#{{window_id}} #{{pane_id}} #{{pane_active}} #{{window_active}}')
 pane=$(printf '%s\n' "$rows" | while read -r w p a active; do
   if [ "$a" = 1 ] && {{ [ "$w" = {win} ] || {{ [ {win} = '@single' ] && [ "$active" = 1 ]; }}; }}; then printf '%s' "$p"; break; fi
 done)
 [ -n "$pane" ] || {{ echo 'The target terminal no longer exists.' >&2; exit 1; }}
+printf '%s\n' "$pane"
+identity=
+if [ {attach} = true ]; then identity=$(recipient) || identity=; fi
+printf '%s' "$identity" | base64 | tr -d '\r\n'
+printf '\n'
 {tmux} -u -L {socket} display-message -p -t "$pane" '#{{pane_current_path}}' | base64
 "#,
+        recipient = recipient_script(tmux, &socket),
+        attach = attach,
         tmux = quote(tmux),
         socket = quote(&socket),
         session = quote(&format!("={}", meta.session)),
@@ -372,7 +412,14 @@ done)
             Ok(bytes)
         },
     )?;
-    let bytes = base64_decode(&String::from_utf8_lossy(&output))
+    let output = String::from_utf8(output).map_err(|_| "Invalid terminal target response.")?;
+    let mut fields = output.splitn(3, '\n');
+    let pane = fields.next().unwrap_or_default().to_string();
+    if !pane.starts_with('%') || pane.len() < 2 || !pane[1..].bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Invalid terminal pane.".into());
+    }
+    let identity = fields.next().unwrap_or_default().to_string();
+    let bytes = base64_decode(fields.next().unwrap_or_default())
         .ok_or("Could not resolve the terminal directory.")?;
     let mut directory =
         String::from_utf8(bytes).map_err(|_| "The terminal directory is not UTF-8.")?;
@@ -382,7 +429,104 @@ done)
     if !directory.starts_with('/') || directory.contains('\0') {
         return Err("Could not resolve an absolute terminal directory.".into());
     }
-    Ok(directory)
+    Ok(Target {
+        directory,
+        pane,
+        identity,
+    })
+}
+
+pub fn resolve_directory(
+    meta: &SessionMeta,
+    win: &str,
+    cancel: &Arc<Cancellation>,
+    extra: &[String],
+) -> Result<String> {
+    resolve_target(meta, win, cancel, extra, false).map(|target| target.directory)
+}
+
+fn paste_path(path: &str) -> Result<String> {
+    if path.chars().any(char::is_control) {
+        return Err(
+            "This path contains control characters and cannot be added to terminal input.".into(),
+        );
+    }
+    // Finder-style escaping is understood by both shells and CLI image-path paste handlers.
+    // Shell concatenations such as 'a'"'"'b.png' are not understood by Claude's paste parser.
+    let mut text = String::new();
+    for c in path.chars() {
+        if !c.is_alphanumeric() && !matches!(c, '/' | '.' | '_' | '-') {
+            text.push('\\');
+        }
+        text.push(c);
+    }
+    // Ordinary file/directory references need a separator before the next drop or typed word.
+    // Image handlers trim this space before resolving the path.
+    text.push(' ');
+    Ok(text)
+}
+
+fn insert_path(
+    meta: &SessionMeta,
+    target: &Target,
+    path: &str,
+    cancel: &Arc<Cancellation>,
+    extra: &[String],
+) -> Result<()> {
+    if target.identity.is_empty() {
+        return Err(
+            "Uploaded, but the terminal recipient could not be verified. Add the path manually."
+                .into(),
+        );
+    }
+    let text = paste_path(path)?;
+    let tmux = meta.tmux_path.as_deref().unwrap_or("tmux");
+    let socket = meta.socket_name.clone().unwrap_or_else(|| {
+        crate::tmux_socket::socket_name(&meta.mode, meta.tmux_version, &meta.session)
+    });
+    let buffer = format!(
+        "buoy-drop-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let script = format!(
+        r#"set -eu
+{recipient}
+pane={pane}
+buffer={buffer}
+check_recipient() {{
+  current=$(recipient | base64 | tr -d '\r\n')
+  [ "$current" = {identity} ] && [ "$(tm display-message -p -t "$pane" '#{{pane_in_mode}}')" = 0 ] || {{
+    echo 'Uploaded, but the terminal program changed. Add the path manually.' >&2; exit 1;
+  }}
+}}
+check_recipient
+trap 'tm delete-buffer -b "$buffer" 2>/dev/null || :' EXIT
+tm load-buffer -b "$buffer" -
+check_recipient
+# -p uses the recipient's bracketed-paste mode; -d consumes only our private buffer.
+tm paste-buffer -p -d -b "$buffer" -t "$pane"
+printf 'INSERTED\n'
+"#,
+        recipient = recipient_script(tmux, &socket),
+        pane = quote(&target.pane),
+        buffer = quote(&buffer),
+        identity = quote(&target.identity)
+    );
+    run(
+        command(meta, &script, extra)?,
+        cancel,
+        |mut input, mut out, _| {
+            input
+                .write_all(text.as_bytes())
+                .map_err(|e| e.to_string())?;
+            drop(input);
+            if line(&mut out)? != "INSERTED" {
+                return Err("Could not confirm path delivery.".into());
+            }
+            Ok(())
+        },
+    )
 }
 
 struct Entry {
@@ -572,9 +716,23 @@ pub fn upload(
     paths: &[PathBuf],
     cancel: Arc<Cancellation>,
     extra: &[String],
+    notify: impl FnMut(&Progress),
+) -> Result<UploadReport> {
+    upload_with_attachment(meta, win, token, paths, cancel, extra, false, notify)
+}
+
+pub fn upload_with_attachment(
+    meta: &SessionMeta,
+    win: &str,
+    token: &str,
+    paths: &[PathBuf],
+    cancel: Arc<Cancellation>,
+    extra: &[String],
+    attach: bool,
     mut notify: impl FnMut(&Progress),
 ) -> Result<UploadReport> {
-    let directory = resolve_directory(meta, win, &cancel, extra)?;
+    let target = resolve_target(meta, win, &cancel, extra, attach)?;
+    let directory = target.directory.clone();
     let mut report = UploadReport {
         directory: directory.clone(),
         items: Vec::new(),
@@ -589,6 +747,7 @@ pub fn upload(
         total: 0,
         completed: 0,
         count: paths.len(),
+        phase: "upload",
     };
     notify(&progress);
     for path in paths {
@@ -662,12 +821,38 @@ pub fn upload(
             name,
             status: status.into(),
             detail,
+            inserted: false,
         });
         progress.completed += 1;
         notify(&progress);
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = progress.completed < progress.count || status == "failed";
             break;
+        }
+    }
+    if attach && !report.cancelled {
+        progress.phase = "attach";
+        for item in &mut report.items {
+            if item.status != "uploaded" {
+                continue;
+            }
+            if cancel.load(Ordering::Relaxed) {
+                report.cancelled = true;
+                break;
+            }
+            progress.item = item.name.clone();
+            notify(&progress);
+            let path = format!("{}/{}", report.directory.trim_end_matches('/'), item.name);
+            match insert_path(meta, &target, &path, &cancel, extra) {
+                Ok(()) => item.inserted = true,
+                Err(error) => item.detail = format!("Not added to terminal: {error}"),
+            }
+            // Keep separate paste events distinct in both CLI input parsers, even over a fast
+            // local connection. All payload bytes remain bounded; no artificial Enter is sent.
+            thread::sleep(Duration::from_millis(100));
+        }
+        if cancel.load(Ordering::Relaxed) {
+            report.cancelled = true;
         }
     }
     Ok(report)

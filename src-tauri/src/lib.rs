@@ -933,7 +933,7 @@ async fn session_force_reconnect(app: AppHandle, id: String) -> Result<(), Strin
 
 // The native drop grant owns local paths; the renderer supplies only its captured session/tab.
 #[tauri::command]
-async fn upload_dropped_files(app: AppHandle, id: String, win: String, token: String) -> Result<file_upload::UploadReport, String> {
+async fn upload_dropped_files(app: AppHandle, id: String, win: String, token: String, attach: Option<bool>) -> Result<file_upload::UploadReport, String> {
     let meta = {
         let state = app.state::<AppState>();
         let sessions = state.sessions.lock().unwrap();
@@ -944,9 +944,9 @@ async fn upload_dropped_files(app: AppHandle, id: String, win: String, token: St
     let worker_token = token.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let mut previous = (String::new(), 0usize, 0u64);
-        file_upload::upload(&meta, &win, &worker_token, &paths, cancel, &[], |progress| {
-            let identity = (progress.item.clone(), progress.completed, progress.total);
+        let mut previous = (String::new(), 0usize, 0u64, "");
+        file_upload::upload_with_attachment(&meta, &win, &worker_token, &paths, cancel, &[], attach.unwrap_or(false), |progress| {
+            let identity = (progress.item.clone(), progress.completed, progress.total, progress.phase);
             if identity != previous || last.elapsed() >= std::time::Duration::from_millis(100) || progress.sent == progress.total {
                 let _ = worker_app.emit("files:progress", progress);
                 previous = identity; last = std::time::Instant::now();
@@ -1236,16 +1236,21 @@ pub fn run() {
         }));
 
     #[cfg(feature = "ui-test")]
-    let builder = builder
-        // Both plugins are compile-time gated. The first installs a deterministic invoke/event
-        // bridge before the bundled tauri-api.ts module runs; the second lets WebdriverIO drive the real native
-        // webview on macOS, Linux, and Windows without Electron or an external browser driver.
-        .plugin(
-            tauri::plugin::Builder::<_, ()>::new("buoy-ui-test")
-                .js_init_script(include_str!("ui_test_init.js"))
-                .build(),
-        )
-        .plugin(tauri_plugin_wdio_webdriver::init());
+    let builder = {
+        // Live manual tests retain the isolated data directory and separate app instance, but
+        // use production commands and native events (including OS-granted file-drop tokens).
+        let builder = if std::env::var("BUOY_UI_TEST_LIVE").as_deref() == Ok("1") {
+            builder
+        } else {
+            builder.plugin(
+                tauri::plugin::Builder::<_, ()>::new("buoy-ui-test")
+                    .js_init_script(include_str!("ui_test_init.js"))
+                    .build(),
+            )
+        };
+        // Compile-time gated; never available in production builds.
+        builder.plugin(tauri_plugin_wdio_webdriver::init())
+    };
 
     builder
         .manage(file_upload::UploadState::default())

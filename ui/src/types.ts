@@ -121,14 +121,15 @@ export interface WindowEvent {
 export interface FileDropEvent { kind: 'enter' | 'leave' | 'drop'; count?: number; token?: string }
 export interface UploadProgress {
   token: string; directory: string; item: string; sent: number; total: number; completed: number; count: number;
+  phase?: 'upload' | 'attach';
 }
 export interface UploadReport {
   directory: string; cancelled: boolean; warnings: string[];
-  items: Array<{ name: string; status: 'uploaded' | 'skipped' | 'failed'; detail: string }>;
+  items: Array<{ name: string; status: 'uploaded' | 'skipped' | 'failed'; detail: string; inserted?: boolean }>;
 }
 
 export interface TerminalAPI {
-  uploadDroppedFiles(id: string, win: string, token: string): Promise<UploadReport>;
+  uploadDroppedFiles(id: string, win: string, token: string, attach: boolean): Promise<UploadReport>;
   cancelFileUpload(token: string): Promise<void>;
   onFileDrop(callback: (event: FileDropEvent) => void): void;
   onUploadProgress(callback: (event: UploadProgress) => void): void;

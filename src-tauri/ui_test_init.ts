@@ -46,6 +46,7 @@ interface TestFixture {
 }
 
 interface CommandArgs {
+  attach?: boolean;
   token?: string;
   path?: string;
   theme?: 'dark' | 'light' | null;
