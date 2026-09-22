@@ -313,6 +313,9 @@ cd src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --n
 
 ## Desktop file and folder uploads
 
+- `file_drop` unit tests exercise native `WindowEvent::DragDrop` enter/over/leave/drop, exact
+  one-use path grants, empty/text drags, and main-window-only grants/cancellation. The main
+  `WebviewWindow` routes drops through window events; child-webview listeners miss this ingress.
 - `cargo test --test file_upload`: private local tmux + real SCP sink test files/folders/empty folders,
   Unicode and shell metacharacters, exact bytes, cwd/tab changes mid-batch, collisions (including
   dangling links), racing destination creation, cancellation/staging cleanup, and invalid windows.

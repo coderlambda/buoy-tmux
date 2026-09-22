@@ -19,6 +19,7 @@ pub mod transport;
 pub mod probe;
 pub mod remote_file;
 pub mod file_upload;
+mod file_drop;
 pub mod html_preview;
 pub mod supervisor;
 pub mod tunnel;
@@ -1254,26 +1255,12 @@ pub fn run() {
 
     builder
         .manage(file_upload::UploadState::default())
-        .on_webview_event(|webview, event| {
-            if webview.label() != "main" { return; }
-            if let tauri::WebviewEvent::DragDrop(event) = event {
-                let payload = match event {
-                    tauri::DragDropEvent::Enter { paths, .. } => json!({ "kind": "enter", "count": paths.len() }),
-                    tauri::DragDropEvent::Over { .. } => return,
-                    tauri::DragDropEvent::Leave => json!({ "kind": "leave" }),
-                    tauri::DragDropEvent::Drop { paths, .. } => {
-                        let token = webview.state::<file_upload::UploadState>().dropped(paths.clone());
-                        json!({ "kind": "drop", "count": paths.len(), "token": token })
-                    },
-                    _ => return,
-                };
-                let _ = webview.emit("files:drop", payload);
-            }
-        })
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                // Dropping a window must not leave an in-flight SSH upload behind.
-                window.state::<file_upload::UploadState>().cancel_all();
+            // The configured main WebviewWindow receives native drops as window events.
+            if let Some(payload) = file_drop::handle_window_event(
+                window.label(), event, &window.state::<file_upload::UploadState>(),
+            ) {
+                let _ = window.emit("files:drop", payload);
             }
         })
         .plugin(tauri_plugin_dialog::init())
