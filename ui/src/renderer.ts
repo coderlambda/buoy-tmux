@@ -1,3 +1,4 @@
+import { installFileDrop } from './fileDrop.js';
 import { initializeTheme, getThemePreference, setThemePreference, onThemeChange } from './theme.js';
 import type { ThemePreference } from './theme.js';
 
@@ -2680,8 +2681,17 @@ async function init(reset = false): Promise<void> {
   }
 }
 
-window.__testReset = () => init(true);
+window.__testReset = () => { fileDrop.reset(); return init(true); };
 void init();
+
+const fileDrop = installFileDrop(api, () => {
+  const view = activeId ? views.get(activeId) : null;
+  const tab = view ? activeTab(view) : null;
+  if (!view || !tab || historyOpen || tab.viewer || view.meta.mode === 'local') return 'Switch to a tmux terminal tab to upload files.';
+  if (document.querySelector('dialog[open]')) return 'Close the dialog before dropping files.';
+  if (view.state !== 'connected' || !view.inputReady) return 'Reconnect this terminal before uploading files.';
+  return { id: view.meta.id, win: tab.winId, label: `${view.meta.title || view.meta.session} › ${tab.title}` };
+});
 
 // §18: periodically re-probe the active session's tunnels so a stopped dev server goes grey (and
 // a restarted one goes active) without a manual refresh. Light: one call every 5s for the shown one.

@@ -18,6 +18,7 @@ pub mod local_backend;
 pub mod transport;
 pub mod probe;
 pub mod remote_file;
+pub mod file_upload;
 pub mod html_preview;
 pub mod supervisor;
 pub mod tunnel;
@@ -930,6 +931,37 @@ async fn session_force_reconnect(app: AppHandle, id: String) -> Result<(), Strin
     }).await.map_err(|error| error.to_string())?
 }
 
+// The native drop grant owns local paths; the renderer supplies only its captured session/tab.
+#[tauri::command]
+async fn upload_dropped_files(app: AppHandle, id: String, win: String, token: String, attach: Option<bool>) -> Result<file_upload::UploadReport, String> {
+    let meta = {
+        let state = app.state::<AppState>();
+        let sessions = state.sessions.lock().unwrap();
+        sessions.get(&id).map(|session| session.meta.clone()).ok_or("Reconnect this terminal before uploading files.")?
+    };
+    let (paths, cancel) = app.state::<file_upload::UploadState>().begin(&token)?;
+    let worker_app = app.clone();
+    let worker_token = token.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let mut previous = (String::new(), 0usize, 0u64, "");
+        file_upload::upload_with_attachment(&meta, &win, &worker_token, &paths, cancel, &[], attach.unwrap_or(false), |progress| {
+            let identity = (progress.item.clone(), progress.completed, progress.total, progress.phase);
+            if identity != previous || last.elapsed() >= std::time::Duration::from_millis(100) || progress.sent == progress.total {
+                let _ = worker_app.emit("files:progress", progress);
+                previous = identity; last = std::time::Instant::now();
+            }
+        })
+    }).await.map_err(|error| error.to_string()).and_then(|result| result);
+    app.state::<file_upload::UploadState>().finish(&token);
+    result
+}
+
+#[tauri::command]
+fn cancel_file_upload(app: AppHandle, token: String) {
+    app.state::<file_upload::UploadState>().cancel(&token);
+}
+
 // Largest file we'll transport for the viewer's Download-to-local path (DESIGN.md §16). Render
 // caps (text 1MB / image 5MB) are enforced renderer-side; this bounds the fetch itself.
 const DOWNLOAD_CAP: usize = 50 * 1024 * 1024;
@@ -1204,18 +1236,46 @@ pub fn run() {
         }));
 
     #[cfg(feature = "ui-test")]
-    let builder = builder
-        // Both plugins are compile-time gated. The first installs a deterministic invoke/event
-        // bridge before the bundled tauri-api.ts module runs; the second lets WebdriverIO drive the real native
-        // webview on macOS, Linux, and Windows without Electron or an external browser driver.
-        .plugin(
-            tauri::plugin::Builder::<_, ()>::new("buoy-ui-test")
-                .js_init_script(include_str!("ui_test_init.js"))
-                .build(),
-        )
-        .plugin(tauri_plugin_wdio_webdriver::init());
+    let builder = {
+        // Live manual tests retain the isolated data directory and separate app instance, but
+        // use production commands and native events (including OS-granted file-drop tokens).
+        let builder = if std::env::var("BUOY_UI_TEST_LIVE").as_deref() == Ok("1") {
+            builder
+        } else {
+            builder.plugin(
+                tauri::plugin::Builder::<_, ()>::new("buoy-ui-test")
+                    .js_init_script(include_str!("ui_test_init.js"))
+                    .build(),
+            )
+        };
+        // Compile-time gated; never available in production builds.
+        builder.plugin(tauri_plugin_wdio_webdriver::init())
+    };
 
     builder
+        .manage(file_upload::UploadState::default())
+        .on_webview_event(|webview, event| {
+            if webview.label() != "main" { return; }
+            if let tauri::WebviewEvent::DragDrop(event) = event {
+                let payload = match event {
+                    tauri::DragDropEvent::Enter { paths, .. } => json!({ "kind": "enter", "count": paths.len() }),
+                    tauri::DragDropEvent::Over { .. } => return,
+                    tauri::DragDropEvent::Leave => json!({ "kind": "leave" }),
+                    tauri::DragDropEvent::Drop { paths, .. } => {
+                        let token = webview.state::<file_upload::UploadState>().dropped(paths.clone());
+                        json!({ "kind": "drop", "count": paths.len(), "token": token })
+                    },
+                    _ => return,
+                };
+                let _ = webview.emit("files:drop", payload);
+            }
+        })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                // Dropping a window must not leave an in-flight SSH upload behind.
+                window.state::<file_upload::UploadState>().cancel_all();
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
@@ -1253,7 +1313,7 @@ pub fn run() {
             discover_tmux_sessions,
             reorder_sessions, set_session_color, set_last_active, set_last_tab, set_tab_prefs,
             tab_new, tab_select, tab_close, tab_capture, tab_rename, open_external, ui_log,
-            read_remote_file, save_file, enable_html_scripts, session_retry, session_force_reconnect,
+            upload_dropped_files, cancel_file_upload, read_remote_file, save_file, enable_html_scripts, session_retry, session_force_reconnect,
             open_forwarded_url, get_config, list_tunnels, close_tunnel, force_forward,
             list_hosts, remember_host, check_open_sessions, set_theme
         ])

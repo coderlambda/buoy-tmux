@@ -311,11 +311,40 @@ cd src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --n
   actual topology reconciliation: close events precede marked fallback selection, while normal
   switches and newly created windows retain their usual selection behavior.
 
+## Desktop file and folder uploads
+
+- `cargo test --test file_upload`: private local tmux + real SCP sink test files/folders/empty folders,
+  Unicode and shell metacharacters, exact bytes, cwd/tab changes mid-batch, collisions (including
+  dangling links), racing destination creation, cancellation/staging cleanup, and invalid windows.
+- `python3 test/run-file-upload.py`: runs upload, cancellation and authentication failure cases over
+  a disposable loopback SSH server with temporary keys. No existing SSH sessions are used.
+- `file_upload` unit tests: OS-drop grants cannot be forged/replayed/reused, expiry and busy/cancel
+  handling, bounded malformed protocol replies, and cancellation while waiting for a blocked child.
+- `gui-file-drop`: native WebView with a mocked command/event boundary exercises drag enter/leave,
+  frozen tab ownership, progress/cancel, busy drops, result details, retry, and unsupported targets.
+  Also checks the persisted Upload & attach / Upload only preference and partial attachment errors.
+- Real tmux attachment tests record raw PTY input: separate bracketed paste events, no Enter,
+  shell-sensitive names, collision skips, cancellation after upload, and a replacement foreground
+  program receiving no input. The native backend pins the pane and foreground process group.
+- `remote_codex_upload` (opt-in): a private Codex composer on an explicitly selected SSH host.
+  Set `BUOY_CODEX_UPLOAD_META` to a SessionMeta JSON (host, session, mode, tmuxPath, socketName),
+  `BUOY_CODEX_UPLOAD_WINDOW` to its window id, and `BUOY_CODEX_UPLOAD_CWD` to its temporary cwd;
+  run `cargo test --manifest-path src-tauri/Cargo.toml --test remote_codex_upload -- --ignored --nocapture`.
+  Use an empty composer in a disposable session, because this adds a draft and uploads fixtures.
+  The test never submits a prompt.
+- Verified on 2026-09-21 over Tailscale SSH to Ubuntu 24.04, tmux 3.4 and Codex CLI 0.153.4:
+  three PNGs become three image chips; Chinese, spaces, quotes and shell metacharacters work;
+  existing draft text survives; file/folder references and empty directories work; repeated names
+  do not create more attachments; uploaded image bytes match the originals.
+- `BUOY_UI_TEST_LIVE=1` on a `ui-test` build disables the mocked bridge while preserving private
+  app data and a separate instance, for manual native-drop testing against real SSH sessions.
+  Physical Finder/Explorer drags still need an unlocked desktop. Claude Code is left for manual
+  acceptance testing; its installed path parser was researched, not its full attachment UI tested.
+
 ## Manual / deferred (documented, not run here)
 
 - mosh / Eternal Terminal transports and their Milestone-0 characterization (TC-M0 in the
   old plan) went to git history with the Electron backends — re-add the cases if/when a
   Rust `et`/`mosh` transport is built.
-- WKWebView-specific gesture behavior (the native selection-drag and drag-DnD differences
-  documented in DESIGN.md §24) can only be confirmed by hand in the shipped `Buoy.app` —
-  the GUI suites run in Chromium.
+- OS selection/drag gesture behavior (including the differences in DESIGN.md §24) still needs
+  physical input in the shipped app; native WebView tests with mocked events do not cover that boundary.
