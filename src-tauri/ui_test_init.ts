@@ -22,6 +22,7 @@ interface CreateResult {
 }
 
 interface TestBackend {
+  uploadReport?: { directory: string; cancelled: boolean; warnings: string[]; items: Array<{ name: string; status: string; detail: string }> };
   files?: Record<string, { data_b64: string; size: number; truncated: boolean }>;
   scriptedPreviewUrl?: string;
   delay?: Record<string, number>;
@@ -45,6 +46,7 @@ interface TestFixture {
 }
 
 interface CommandArgs {
+  token?: string;
   path?: string;
   theme?: 'dark' | 'light' | null;
   remote?: number;
@@ -243,6 +245,10 @@ interface Window {
         return null;
       case 'list_tunnels': return tunnelSnapshot;
       case 'list_hosts': return clone(backend.hosts ?? []);
+      case 'upload_dropped_files': return clone(backend.uploadReport ?? {
+        directory: '/work/project', cancelled: false, warnings: [], items: [{ name: 'notes.txt', status: 'uploaded', detail: '' }],
+      });
+      case 'cancel_file_upload': return null;
       case 'read_remote_file':
         return clone(backend.files?.[args.path ?? ''] ?? {});
       case 'enable_html_scripts':

@@ -21,6 +21,10 @@ function on<T>(event: string, cb: (payload: T) => void): void {
 }
 
 export const terminalAPI: TerminalAPI = {
+  uploadDroppedFiles: (id, win, token) => invoke('upload_dropped_files', { id, win, token }),
+  cancelFileUpload: (token) => invoke('cancel_file_upload', { token }),
+  onFileDrop: cb => on('files:drop', cb),
+  onUploadProgress: cb => on('files:progress', cb),
   setTheme: (theme) => invoke('set_theme', { theme }),
   // session CRUD — the Rust side owns all argv/validation.
   listSessions: () => invoke('list_sessions'),

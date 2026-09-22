@@ -311,6 +311,19 @@ cd src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- --ignored --n
   actual topology reconciliation: close events precede marked fallback selection, while normal
   switches and newly created windows retain their usual selection behavior.
 
+## Desktop file and folder uploads
+
+- `cargo test --test file_upload`: private local tmux + real SCP sink test files/folders/empty folders,
+  Unicode and shell metacharacters, exact bytes, cwd/tab changes mid-batch, collisions (including
+  dangling links), racing destination creation, cancellation/staging cleanup, and invalid windows.
+- `python3 test/run-file-upload.py`: runs upload, cancellation and authentication failure cases over
+  a disposable loopback SSH server with temporary keys. No existing SSH sessions are used.
+- `file_upload` unit tests: OS-drop grants cannot be forged/replayed/reused, expiry and busy/cancel
+  handling, bounded malformed protocol replies, and cancellation while waiting for a blocked child.
+- `gui-file-drop`: native WebView with a mocked command/event boundary exercises drag enter/leave,
+  frozen tab ownership, progress/cancel, busy drops, result details, retry, and unsupported targets.
+  Physical Finder/Explorer drag gestures are still a manual cross-platform check.
+
 ## Manual / deferred (documented, not run here)
 
 - mosh / Eternal Terminal transports and their Milestone-0 characterization (TC-M0 in the

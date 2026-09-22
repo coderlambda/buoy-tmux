@@ -111,6 +111,12 @@ sidebar.
 
 ### Terminal output that is useful outside the terminal
 
+- Drag desktop files or folders onto a connected terminal to upload them into that tab's current
+  directory over SCP (local tmux tabs copy locally). Folder structure and empty directories are kept;
+  progress, cancellation, and per-item results appear in the window.
+- Existing names are skipped, including whole folders; files are never merged into an existing
+  folder. Symbolic links and special files are skipped and reported. Preview tabs and standalone
+  shells without tmux are not upload targets.
 - Click web URLs to open them in the default browser.
 - Click absolute, home-relative, relative, and common filename paths to preview remote files inside
   Buoy.

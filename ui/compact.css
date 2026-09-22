@@ -198,3 +198,23 @@ dialog .discovered-session.selected { background:var(--tint); }
 @media(pointer:coarse) { .icon-button,dialog .icon-button { min-width:36px; min-height:44px; } .session .tunnel { grid-template-columns:1fr; }
   .tunnel-actions { grid-column:1; } .tunnel-link { height:44px; } .session .tunnel .icon-button { width:40px; }
   .session .name-row { min-height:44px; } .session .connection { min-width:17px; } input { font-size:16px!important; } }
+
+.file-drop-overlay { position:fixed; z-index:100; inset:6px; border:2px solid var(--accent); border-radius:8px;
+  background:color-mix(in srgb, var(--panel) 90%, transparent); backdrop-filter:blur(8px); pointer-events:none;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px; color:var(--fg); }
+.file-drop-overlay strong { font-size:17px; }
+.file-drop-overlay span { color:var(--muted); max-width:85%; overflow-wrap:anywhere; }
+.file-upload-panel { position:fixed; z-index:90; bottom:40px; right:12px; width:350px; max-width:calc(100vw - 48px);
+  padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--fg);
+  box-shadow:0 8px 32px #0005; }
+.file-upload-panel header { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.upload-owner, .upload-detail { font-size:11px; color:var(--muted); margin-top:7px; overflow-wrap:anywhere; }
+.file-upload-panel progress { appearance:none; -webkit-appearance:none; border:0; background:var(--line); border-radius:3px; display:block; width:100%; height:5px; margin-top:10px; accent-color:var(--accent); }
+.upload-results { list-style:none; margin:8px 0 0; padding:0; max-height:160px; overflow:auto; font-size:11px; }
+.upload-results li { padding:4px 0; overflow-wrap:anywhere; }
+.upload-failed { color:var(--danger); }
+.upload-skipped { color:var(--warning); }
+
+.file-upload-panel progress::-webkit-progress-bar { background:var(--line); border-radius:3px; }
+.file-upload-panel progress::-webkit-progress-value { background:var(--accent); border-radius:3px; }
+.file-upload-panel progress::-moz-progress-bar { background:var(--accent); border-radius:3px; }
