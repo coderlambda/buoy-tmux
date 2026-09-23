@@ -189,7 +189,7 @@ h1 span {
   border-radius: 50%;
   background: #087f63;
 }
-.workspace > img {
+.workspace img {
   width: 100%;
   border-radius: 9px;
   border: 1px solid #252638;
@@ -224,8 +224,8 @@ h2 {
 }
 .feature-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 48px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 28px;
 }
 .feature-number {
   font: 14px var(--mono);
@@ -542,5 +542,83 @@ details a {
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
+  }
+}
+
+.product-tour {
+  padding-bottom: 64px;
+}
+.tour-row {
+  display: grid;
+  grid-template-columns: 0.85fr 1.65fr;
+  align-items: center;
+  gap: 56px;
+  border-top: 1px solid var(--line);
+  padding-block: 64px;
+}
+.tour-copy h2 {
+  font-size: clamp(29px, 2.7vw, 38px);
+  margin-bottom: 24px;
+}
+.tour-copy > p:not(.eyebrow) {
+  color: var(--muted);
+}
+.tour-copy code {
+  font: 14px var(--mono);
+  overflow-wrap: anywhere;
+}
+.tour-copy .tour-note {
+  font-size: 14px;
+  color: var(--blue);
+  border-left: 2px solid var(--blue);
+  padding-left: 16px;
+}
+.tour-row figure {
+  margin: 0;
+  min-width: 0;
+}
+.tour-row figure img {
+  border: 1px solid #292b3b;
+  border-radius: 7px;
+  box-shadow: 0 16px 38px -24px #15294460;
+  width: 100%;
+}
+.tour-row figure a {
+  display: block;
+  border-radius: 7px;
+}
+.tour-row figcaption {
+  font-size: 14px;
+  margin-top: 16px;
+}
+.capture-note {
+  font-size: 14px;
+  color: var(--muted);
+  text-align: center;
+  margin-bottom: 0;
+}
+@media (max-width: 1050px) {
+  .feature-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .tour-row {
+    gap: 32px;
+    grid-template-columns: 0.95fr 1.4fr;
+  }
+}
+@media (max-width: 800px) {
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+  .tour-row {
+    grid-template-columns: 1fr;
+    gap: 28px;
+    padding-block: 42px;
+  }
+  .tour-copy {
+    max-width: 620px;
+  }
+  .product-tour {
+    padding-bottom: 44px;
   }
 }

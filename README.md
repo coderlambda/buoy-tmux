@@ -1,146 +1,96 @@
 # Buoy — Desktop tmux Client
 
-**A focused, resilient desktop client for tmux.**
+**Stable tmux connections, with the files and services around them within reach.**
 
-Buoy gives long-running local and remote tmux sessions a permanent home on your desktop. Open a
-project, work across its tmux windows as native tabs, close the app, change networks, or let the
-laptop sleep—Buoy reconnects to the same session and brings the workspace back.
-
-Buoy is intentionally not a general-purpose terminal toolbox. It is built around one job: making
-tmux sessions easy to find, operate, and trust through unreliable connections.
+Buoy is a free, open-source desktop client for local and remote tmux workspaces on macOS,
+Windows, and Linux. Keep a session running, preview its files in place, open remote localhost
+services through automatic SSH tunnels, and drag files from your desktop into the terminal.
 
 [Project website](https://coderlambda.github.io/buoy-tmux/) ·
 [Download the latest release](https://github.com/coderlambda/buoy-tmux/releases/latest)
 
-## Why Buoy
+## Five things Buoy helps you do
 
-A normal SSH terminal treats the connection as the session. When the connection disappears, the
-window becomes disposable and getting back to the right tmux session is manual work.
+### 1. Keep a stable connection to tmux
 
-Buoy treats the **tmux session as the durable workspace** and the SSH connection as replaceable:
+[![Buoy 0.1.4 showing local and remote workspaces, native tmux tabs, clickable file paths and a localhost service](docs/screenshots/workspace-overview.png)](docs/screenshots/workspace-overview.png)
 
-- Projects remain in a persistent sidebar with their connection state and unread activity.
-- Reconnects always target the existing tmux session instead of creating duplicates.
-- tmux windows appear as native tabs and stay associated with the correct project.
-- Terminal contents, cursor position, and active window are restored after reconnecting.
-- Local tmux sessions work the same way and survive quitting Buoy.
+The tmux session is the durable workspace; SSH is the connection to it. Change networks,
+let the laptop sleep, or quit Buoy, then return to the same running session. Buoy reconnects
+with bounded retries and restores the terminal buffer, cursor, and active window. Local
+tmux workspaces also survive quitting the app.
 
-The name comes from that behavior: a connection can be pushed under by a wave, but the session
-resurfaces.
+The compact sidebar keeps projects in sight, while native tabs map to tmux windows.
+Existing panes and tmux key bindings continue to work.
 
-## Product tour
+### 2. Preview files and HTML pages in place
 
-### Keep every tmux workspace in sight
+[![A self-contained HTML report open in a Buoy preview tab beside its source terminal](docs/screenshots/html-preview.png)](docs/screenshots/html-preview.png)
 
-[![Buoy showing remote and local tmux workspaces, native tabs, an unread Codex notification, and a forwarded port](docs/screenshots/workspace-overview.png)](docs/screenshots/workspace-overview.png)
+Click a file path in terminal output to preview text, Markdown, images, or self-contained
+HTML inside Buoy. The preview opens immediately to the right of its source tab, with visible
+**Copy path** and **Download** controls. Absolute, home-relative, relative, and common filename
+paths are supported, including file links emitted by terminal agents.
 
-Each sidebar entry is a durable tmux workspace, not a disposable terminal connection. Remote and
-local projects live together, while their colored status dots show whether they are connected or
-reconnecting. Select a project and its tmux windows become native tabs with independent terminal
-buffers and scrollback.
+HTML files open with JavaScript disabled. **Enable JavaScript** asks for confirmation for
+that file. Ordinary web URLs and localhost services open in the system browser.
 
-The same view keeps background work visible without becoming noisy: the blue dot under the
-connection status rolls up unread activity from the `codex` tab, and the `:3000 → :3000` row shows
-an active SSH tunnel for a remote loopback service.
+[See the Markdown preview](docs/screenshots/file-preview.png).
 
-### Import tmux sessions that are already running
+### 3. Recognize localhost service addresses automatically
 
-[![Buoy discovering existing tmux sessions on a remote host and preparing to import one](docs/screenshots/import-existing-sessions.png)](docs/screenshots/import-existing-sessions.png)
+[![A remote localhost service in terminal output and its managed port 3000 tunnel in the sidebar](docs/screenshots/localhost-tunnel.png)](docs/screenshots/localhost-tunnel.png)
 
-Buoy can inspect the default tmux server on a local or remote host, show each session's window and
-attachment counts, and import the one you choose. Sessions already open in Buoy are left out of the
-list, and importing does not detach their existing tmux clients. This makes Buoy useful with the
-workspaces you already have—there is no migration step or shell setup to maintain.
+Addresses such as `http://localhost:3000`, `localhost:3000`, and `127.0.0.1:8080` become
+clickable in terminal output. There is no need to copy the port or assemble a separate
+forwarding command each time a development server prints its URL.
 
-### Detach safely, or resume deliberately closed work
+### 4. Establish and restore SSH tunnels
 
-[![Buoy showing active workspaces and closed projects that can be resumed from History](docs/screenshots/session-history.png)](docs/screenshots/session-history.png)
+Click a remote loopback address and Buoy establishes the SSH forward, checks the service,
+and opens its local URL in your browser. The tunnel appears beneath its owning workspace.
 
-**Detach** closes only Buoy's client and leaves tmux running. **Close** deliberately ends the tmux
-session after saving a recovery snapshot in History. Choosing **Resume** rebuilds its tabs as
-shells in their last known working directories and labels them with the last foreground commands,
-so the context of the workspace is still recognizable after a host restart or intentional close.
-It does not pretend to restore process memory or unsaved application state.
+Buoy remembers the local port and restores the forward after reconnecting, so an existing
+browser tab can keep using the same address. Open it again, request the same local/remote
+port with **=**, or stop the forward from the sidebar. Stopping the forward leaves the
+remote service running; an occupied local port produces a visible error.
 
-## Features
+**Recognize the address → establish the tunnel → open the browser.**
 
-### Durable local and remote workspaces
+### 5. Drag files and folders into the terminal
 
-- Connect to remote machines through SSH and keep the actual workspace alive in tmux.
-- Run local shells inside tmux for the same quit-and-return workflow on your own machine.
-- Discover sessions already running on the local or remote default tmux server and import them
-  without detaching their existing clients or changing their shell configuration.
-- Restore saved projects when Buoy opens again.
-- Recover from network changes, sleep, and temporary SSH failures with bounded
-  retries—without spawning duplicate clients or hammering authentication.
-- See clear connecting, connected, reconnecting, disconnected, and failed states in the sidebar.
-- If a host reboot removes the tmux server, rebuild the saved windows as shells in their last known
-  working directories, labeled with the commands that were running before the reboot.
+[![Buoy showing upload results, destination directory, and paths added to the original terminal input](docs/screenshots/file-upload.png)](docs/screenshots/file-upload.png)
 
-### tmux windows as native tabs
+Drop desktop files or folders onto a connected terminal to upload them into that tab's
+current directory over SSH/SCP. Folder structure and empty directories are preserved;
+progress, cancellation, and per-item results stay visible. Local tmux tabs copy locally.
 
-With tmux 3.2 or newer, Buoy uses tmux control mode to mirror windows directly into its tab bar.
+- **Upload & attach** adds successful paths to the original terminal input without pressing
+  Enter. Supported image paths become attachments in Codex/Claude Code; other items become
+  path references. Paths are not inserted if the original terminal program has changed.
+- **Upload only** leaves the terminal input alone. Switch modes with the sidebar paperclip.
+- Existing names are skipped, including whole folders. Files are not merged into an existing
+  folder. Symbolic links and special files are skipped and reported.
+- Uploads require a connected tmux-backed terminal. Preview tabs and plain fallback shells
+  are not upload targets.
 
-- Create, select, close, and rename tmux windows from the app.
-- Reorder projects and tabs with drag and drop; the order is remembered.
-- Rename projects independently from their tmux session names.
-- Keep each tab's output, scrollback, cursor, and notification state separate.
-- Fall back to a regular single terminal view when native tabs are unavailable or disabled.
+[See the drop target](docs/screenshots/file-drop.png).
 
-Buoy maps tmux **windows** to tabs. Layouts and panes inside a window remain under tmux's control,
-so existing tmux workflows and key bindings continue to work.
+Screenshots show the v0.1.4 interface with demonstration workspaces.
 
-### Reconnection that preserves what you were looking at
+## Also included
 
-Reconnection is more than starting SSH again. Buoy waits for tmux and the terminal view to agree on
-the visible size, then restores the active window, complete buffer, and cursor before normal input
-resumes. Hidden tabs are refreshed when revealed, and the visible pane recovers after focus changes
-or system wake.
-
-The result is designed to feel like returning to the same terminal, not opening a replacement one.
-
-### Agent notifications without global configuration
-
-Buoy shows an unread dot on the tab that requested attention and rolls it up to the project in the
-sidebar.
-
-- Codex works through its terminal notification fallback with no additional Buoy configuration.
-- Claude Code receives a Buoy-scoped hook integration without modifying global Claude settings.
-- Detached and background tabs retain their own unread state.
-- Interacting with the relevant terminal acknowledges that tab without clearing unrelated work.
-- Existing cmux-managed Claude installations are detected so Claude is not wrapped twice.
-
-### Terminal output that is useful outside the terminal
-
-- Drag desktop files or folders onto a connected terminal to upload them into that tab's current
-  directory over SCP (local tmux tabs copy locally). Folder structure and empty directories are kept;
-  progress, cancellation, and per-item results appear in the window.
-- By default, successful uploads are added to the original terminal input without pressing Enter.
-  Supported image paths become attachments in Codex/Claude Code; other files and folders become
-  path references. The paperclip in the sidebar switches between **Upload & attach** and
-  **Upload only**. Paths are not inserted if the original terminal program has changed.
-- Existing names are skipped, including whole folders; files are never merged into an existing
-  folder. Symbolic links and special files are skipped and reported. Preview tabs and standalone
-  shells without tmux are not upload targets.
-- Click web URLs to open them in the default browser.
-- Click absolute, home-relative, relative, and common filename paths to preview remote files inside
-  Buoy.
-- Preview text, Markdown, images, and self-contained HTML; download the original file locally when
-  needed.
-- Open remote `localhost:<port>` links through an on-demand SSH tunnel. Buoy remembers the local
-  port and restores the tunnel after reconnecting, so an already-open browser tab keeps working.
-- Use the same smart URL and file handling for OSC 8 hyperlinks emitted by modern command-line
-  tools.
-
-### A dependable terminal experience
-
-- Responsive terminal rendering with automatic fallback and full-screen repaint recovery.
-- One consistent terminal scrollbar with persistent scrollback for each tab.
-- Remote clipboard copy support plus normal selection shortcuts and context-menu copy.
-- Correct input and terminal replies even when switching quickly between tmux windows.
-- Session and tab colors, inline rename, persistent ordering, and a focused connection-status UI.
-- Dark blue by default. Click the appearance icon in the sidebar footer to choose Dark, Light, or
-  System; Buoy remembers the choice and updates the window and terminals together.
+- **Import existing sessions:** discover local or remote tmux sessions without detaching their
+  existing clients or changing shell configuration.
+- **Session history:** Detach closes only Buoy's client. End saves a recovery snapshot and
+  ends tmux; Restore rebuilds shells in their last directories. It does not restore process
+  memory or unsaved application state.
+- **Terminal search:** search loaded scrollback per tab with Cmd+F / Ctrl+F, match navigation,
+  case sensitivity, and whole-word options.
+- **Agent notifications:** per-tab unread indicators for Codex and a Buoy-scoped Claude Code
+  hook, without changing global Claude settings.
+- **Personalize the workspace:** Dark, Light, or System appearance; project and tab colors;
+  rename and reorder projects and tabs with remembered ordering.
 
 ## Getting started
 
@@ -230,7 +180,7 @@ npm run tauri:dev
 
 Create production bundles with `npm run tauri:build`. Contributors can run the complete validation
 suite with `npm run typecheck`, `npm test`, `npm run tauri:test`, and `npm run test:ui`.
-Regenerate the privacy-safe product screenshots with `npm run screenshots:readme`.
+The current product screenshot workflow is documented in [docs/product-screenshots.md](docs/product-screenshots.md).
 
 Implementation details and contributor references live in [DESIGN.md](DESIGN.md),
 [TEST_PLAN.md](TEST_PLAN.md), [OSC_NOTIFICATIONS_DESIGN.md](OSC_NOTIFICATIONS_DESIGN.md), and

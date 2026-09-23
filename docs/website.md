@@ -17,6 +17,10 @@ Keep the canonical URL, Open Graph URL, structured-data URL, and `sitemap.xml` a
 The existing app icon and README screenshot are reused; no external fonts, analytics,
 cookies, third-party scripts, or client-side rendering are required.
 
+The current feature tour and captures follow [product-screenshots.md](product-screenshots.md).
+Screenshots below the fold load lazily and can be opened at full size. Keep the five primary
+capabilities aligned between the README, website, repository description, and profile links.
+
 ## Google Search Console
 
 Use the URL-prefix property `https://coderlambda.github.io/buoy-tmux/`.
