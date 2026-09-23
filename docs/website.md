@@ -33,3 +33,22 @@ GitHub Pages project sites live under a path. A `robots.txt` in `website/` would
 served at `/buoy-tmux/robots.txt`, but crawlers only use the host's `/robots.txt`.
 Do not add a project-local file and assume that it controls crawling. No root robots
 file (HTTP 404) permits crawling by default; submit the sitemap directly in Search Console.
+
+## Initial publication — September 22, 2026
+
+- Published successfully with HTTPS via the `Publish project website` workflow.
+- Added the homepage to the repository's About URL, project README, and owner profile README.
+- Verified the URL-prefix property with the homepage's HTML meta tag.
+- Requested indexing of the homepage; Google confirmed it was added to the priority crawl queue.
+- Submitted the sitemap. The Sitemaps report still said **Couldn't fetch**, while Google's
+  live URL inspection at 18:36 Pacific reported **Crawl allowed: Yes**, **Page fetch: Successful**,
+  and **Indexing allowed: Yes** for the exact sitemap URL. Resubmitted after that successful test.
+  Submission and live fetch success do not mean that sitemap processing or indexing is complete.
+- Checked desktop and 390 px layouts, loaded images, download and source destinations, page
+  anchors, FAQ controls, JSON-LD, sitemap XML, and public HTTP responses. The host's root
+  `robots.txt` returned 404; the homepage had no `noindex` or `X-Robots-Tag` restriction.
+
+Google retries failed sitemap fetches for a few days. If the report continues to fail,
+use its specific error and live URL inspection results to diagnose it before resubmitting;
+see [Google's sitemap troubleshooting guide](https://support.google.com/webmasters/answer/7451001#errors).
+Do not repeatedly request indexing of the same homepage; it does not improve queue priority.
