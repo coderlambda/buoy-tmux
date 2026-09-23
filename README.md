@@ -1,4 +1,4 @@
-# Buoy
+# Buoy — Desktop tmux Client
 
 **A focused, resilient desktop client for tmux.**
 
@@ -9,6 +9,7 @@ laptop sleep—Buoy reconnects to the same session and brings the workspace back
 Buoy is intentionally not a general-purpose terminal toolbox. It is built around one job: making
 tmux sessions easy to find, operate, and trust through unreliable connections.
 
+[Project website](https://coderlambda.github.io/buoy-tmux/) ·
 [Download the latest release](https://github.com/coderlambda/buoy-tmux/releases/latest)
 
 ## Why Buoy

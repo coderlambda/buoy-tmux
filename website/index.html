@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Buoy — Desktop tmux Client for macOS, Windows &amp; Linux</title>
+    <meta
+      name="description"
+      content="Buoy is a free, open-source desktop client for tmux. Manage local and remote SSH sessions with native tabs, reconnection, and session import on macOS, Windows, and Linux."
+    />
+    <meta
+      name="google-site-verification"
+      content="PawVtiC2oHZpRZaDVVTb0toKYGZBkTpjSOSq20NhTOI"
+    />
+    <link rel="canonical" href="https://coderlambda.github.io/buoy-tmux/" />
+    <link rel="icon" type="image/png" href="assets/buoy.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="sitemap" type="application/xml" href="sitemap.xml" />
+    <meta name="theme-color" content="#f4f6fa" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Buoy" />
+    <meta
+      property="og:title"
+      content="Buoy — A desktop home for your tmux sessions"
+    />
+    <meta
+      property="og:description"
+      content="A free, open-source tmux client with native tabs, SSH reconnection, and durable local and remote workspaces."
+    />
+    <meta
+      property="og:url"
+      content="https://coderlambda.github.io/buoy-tmux/"
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Buoy",
+        "alternateName": "buoy-tmux",
+        "url": "https://coderlambda.github.io/buoy-tmux/",
+        "description": "A free, open-source desktop client for local and remote tmux sessions over SSH, with native tabs, reconnection, and session import.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Windows, Linux",
+        "isAccessibleForFree": true,
+        "license": "https://github.com/coderlambda/buoy-tmux/blob/main/LICENSE",
+        "downloadUrl": "https://github.com/coderlambda/buoy-tmux/releases/latest",
+        "softwareRequirements": "tmux on the session host; tmux 3.2 or newer for native tabs; SSH access for remote sessions",
+        "screenshot": "https://coderlambda.github.io/buoy-tmux/assets/workspace-overview.png",
+        "sameAs": "https://github.com/coderlambda/buoy-tmux",
+        "author": {
+          "@type": "Person",
+          "name": "coderlambda",
+          "url": "https://github.com/coderlambda"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header wrap">
+      <a class="brand" href="./" aria-label="Buoy home"
+        ><img src="assets/buoy.png" width="38" height="38" alt="" />Buoy</a
+      >
+      <nav aria-label="Main navigation">
+        <a href="#workflow">Workflow</a>
+        <a href="https://github.com/coderlambda/buoy-tmux"
+          >GitHub <span aria-hidden="true">↗</span></a
+        >
+        <a class="nav-download" href="#download">Download</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero wrap" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">A DESKTOP CLIENT FOR TMUX</p>
+          <h1 id="hero-title">
+            Your sessions.<br />Your desktop.<br /><span>Back in flow.</span>
+          </h1>
+          <p class="hero-description">
+            Buoy gives local and remote tmux sessions a home on your desktop.
+            Native tabs, reliable SSH reconnection, and a clear view of every
+            workspace.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#download"
+              >Get Buoy <span aria-hidden="true">↓</span></a
+            >
+            <a class="text-link" href="https://github.com/coderlambda/buoy-tmux"
+              >Explore the source <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <p class="availability">
+            macOS · Windows · Linux <span>Free &amp; open source</span>
+          </p>
+        </div>
+        <figure class="workspace">
+          <div class="window-caption">
+            <span class="status-dot" aria-hidden="true"></span> One workspace.
+            Wherever you left it.
+          </div>
+          <img
+            src="assets/workspace-overview.png"
+            width="1200"
+            height="760"
+            fetchpriority="high"
+            alt="Buoy with local and remote tmux projects in the sidebar, shell and Codex tabs, and an active SSH port forward."
+          />
+          <figcaption>
+            Local shells and remote projects, together in one view.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section
+        class="workflow wrap"
+        id="workflow"
+        aria-labelledby="workflow-title"
+      >
+        <div class="section-heading">
+          <p class="eyebrow">BUILT AROUND YOUR WORK</p>
+          <h2 id="workflow-title">
+            The connection changes.<br />The workspace stays.
+          </h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <span class="feature-number" aria-hidden="true">01 /</span>
+            <h3>Reconnect to your work</h3>
+            <p>
+              Change networks, let your laptop sleep, or quit Buoy. Return to
+              the same running tmux session, with its terminal buffer and active
+              window restored.
+            </p>
+          </article>
+          <article>
+            <span class="feature-number" aria-hidden="true">02 /</span>
+            <h3>Give every window a tab</h3>
+            <p>
+              See tmux windows as native tabs. Keep local and remote projects in
+              a persistent sidebar, with connection states and unread activity
+              in sight.
+            </p>
+          </article>
+          <article>
+            <span class="feature-number" aria-hidden="true">03 /</span>
+            <h3>Bring the sessions you have</h3>
+            <p>
+              Find and import existing tmux sessions without detaching other
+              clients. Keep your panes, key bindings, and established shell
+              workflow.
+            </p>
+          </article>
+        </div>
+        <div class="extras">
+          <span>Also on board</span>
+          <p>
+            Codex &amp; Claude Code notifications
+            <b aria-hidden="true">/</b> Remote file previews
+            <b aria-hidden="true">/</b> SSH port forwarding
+            <b aria-hidden="true">/</b> Session history
+          </p>
+        </div>
+      </section>
+
+      <section
+        class="download-section"
+        id="download"
+        aria-labelledby="download-title"
+      >
+        <div class="wrap download-layout">
+          <div>
+            <p class="eyebrow">PICK UP WHERE YOU LEFT OFF</p>
+            <h2 id="download-title">Make room for<br />long-running work.</h2>
+            <p>Choose your package from the latest GitHub release.</p>
+            <a
+              class="button primary"
+              href="https://github.com/coderlambda/buoy-tmux/releases/latest"
+              >Download Buoy <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <div class="platforms">
+            <div>
+              <h3>macOS</h3>
+              <p>
+                Universal DMG · Apple Silicon &amp; Intel<br />Developer ID
+                signed and notarized
+              </p>
+            </div>
+            <div>
+              <h3>Windows</h3>
+              <p>x64 · MSI or setup executable<br />Currently unsigned</p>
+            </div>
+            <div>
+              <h3>Linux</h3>
+              <p>x86_64 · AppImage, .deb, or .rpm</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="notes wrap" aria-labelledby="notes-title">
+        <div class="section-heading">
+          <p class="eyebrow">BEFORE YOU CONNECT</p>
+          <h2 id="notes-title">A few useful details.</h2>
+        </div>
+        <div class="details-list">
+          <details open>
+            <summary>What do I need to run Buoy?</summary>
+            <p>
+              For remote sessions, you need SSH access and tmux installed on the
+              remote host. For durable local sessions, install tmux locally.
+              Native tabs require tmux 3.2 or newer; older versions use a
+              regular terminal view.
+              <a href="https://github.com/coderlambda/buoy-tmux#requirements"
+                >Read the requirements</a
+              >.
+            </p>
+          </details>
+          <details>
+            <summary>What happens when I close the app or a session?</summary>
+            <p>
+              Quitting Buoy or detaching leaves tmux running. Deliberately
+              closing a session ends it and saves a recovery snapshot. Resume
+              rebuilds shells in their last working directories; it does not
+              restore running processes or unsaved application state. A plain
+              local shell without tmux cannot survive quitting Buoy.
+            </p>
+          </details>
+          <details>
+            <summary>Is Buoy free and open source?</summary>
+            <p>
+              Yes. Buoy is available under the MIT license. The source,
+              installation instructions, release notes, and issue tracker live
+              in the
+              <a href="https://github.com/coderlambda/buoy-tmux"
+                >buoy-tmux repository on GitHub</a
+              >.
+            </p>
+          </details>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer wrap">
+      <a class="brand" href="./"
+        ><img src="assets/buoy.png" width="28" height="28" alt="" />Buoy</a
+      >
+      <p>A focused, resilient desktop client for tmux.</p>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/coderlambda/buoy-tmux#readme">Docs</a
+        ><a href="https://github.com/coderlambda/buoy-tmux/issues">Issues</a
+        ><a href="https://github.com/coderlambda/buoy-tmux/blob/main/LICENSE"
+          >MIT license</a
+        >
+      </nav>
+    </footer>
+  </body>
+</html>
