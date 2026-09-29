@@ -212,6 +212,7 @@ mod tests {
             tmux_path: "tmux".into(),
             tmux_version: None,
             socket_name: format!("buoy-mobile-dt-{id}"),
+            tmux_created_at: None,
             order: 0,
             color: None,
             last_tab: None,

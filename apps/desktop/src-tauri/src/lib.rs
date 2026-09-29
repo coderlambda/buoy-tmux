@@ -34,6 +34,11 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
+use buoy_core::{
+    RemoteLifecycleState, RemoteRecoveryTab, RemoteSessionDisplay, RemoteSessionIdentity,
+    RemoteSessionLifecycle, RemoteSessionRecord, RemoteSessionRecovery, RemoteSessionRuntime,
+    REMOTE_STATE_SCHEMA_VERSION,
+};
 
 use control_backend::{BackendConfig, BackendEvent};
 use plain_backend::{PlainBackend, PlainConfig, PlainEvent};
@@ -292,6 +297,66 @@ fn mark_attach_proven(app: &AppHandle, id: &str, once: &std::sync::atomic::Atomi
     if let Some(state) = app.try_state::<AppState>() {
         state.store.set_attach_ok(id, true);
     }
+    let app = app.clone();
+    let id = id.to_string();
+    std::thread::spawn(move || {
+        let Some(state) = app.try_state::<AppState>() else { return };
+        let operation = state.lifecycle_lock(&id);
+        let _guard = operation.lock().unwrap();
+        let Some(meta) = state.store.load().into_iter()
+            .find(|saved| saved.id == id && !saved.archived && saved.attach_ok)
+        else { return };
+        if let Err(error) = write_remote_record(&meta, RemoteLifecycleState::Active) {
+            dlog!("remote active state sync failed for {}: {}", meta.session, error);
+        }
+    });
+}
+
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn remote_record(meta: &SessionMeta, lifecycle: RemoteLifecycleState) -> RemoteSessionRecord {
+    let updated_at = epoch_millis();
+    RemoteSessionRecord {
+        schema_version: REMOTE_STATE_SCHEMA_VERSION,
+        revision: updated_at,
+        identity: RemoteSessionIdentity {
+            socket_name: session_socket(meta),
+            session: meta.session.clone(),
+            tmux_created_at: meta.tmux_created_at,
+        },
+        runtime: RemoteSessionRuntime {
+            mode: if meta.mode == "control" { "control".into() } else { "plain".into() },
+            tmux_path: meta.tmux_path.clone().unwrap_or_else(|| "tmux".into()),
+            tmux_version: meta.tmux_version.map(|(major, minor)| vec![major, minor]),
+        },
+        display: RemoteSessionDisplay {
+            title: meta.title.clone().unwrap_or_else(|| meta.session.clone()),
+        },
+        lifecycle: RemoteSessionLifecycle { state: lifecycle, updated_at },
+        recovery: RemoteSessionRecovery {
+            tabs: meta.recovery_tabs.iter().map(|tab| RemoteRecoveryTab {
+                window: tab.window.clone(),
+                title: tab.title.clone(),
+                cwd: tab.cwd.clone(),
+                shell: tab.shell.clone(),
+                last_command: tab.last_command.clone(),
+            }).collect(),
+        },
+    }
+}
+
+fn write_remote_record(meta: &SessionMeta, lifecycle: RemoteLifecycleState) -> Result<(), String> {
+    let transport = if meta.transport == "local" {
+        transport::Transport::Local
+    } else {
+        transport::Transport::Ssh
+    };
+    tmux_discovery::write_remote_record(transport, &meta.host, &remote_record(meta, lifecycle))
 }
 
 // --- Tauri commands (the renderer's IPC surface; replaces preload.js) ----------------------
@@ -334,6 +399,12 @@ struct CreateArgs {
     tmux_version: Option<(u32, u32)>,
     #[serde(default, rename = "socketName")]
     socket_name: Option<String>,
+    #[serde(default, rename = "tmuxCreatedAt")]
+    tmux_created_at: Option<u64>,
+    #[serde(default, rename = "recoveryTabs")]
+    recovery_tabs: Vec<RecoveryTab>,
+    #[serde(default, rename = "restorePending")]
+    restore_pending: bool,
     transport: Option<String>,
 }
 
@@ -444,7 +515,7 @@ fn create_session_inner(app: AppHandle, state: State<AppState>, meta: CreateArgs
     let recovery_windows = previous_meta.as_ref()
         .map(|s| s.recovery_windows.clone()).unwrap_or_default();
 
-    let session_meta = SessionMeta {
+    let mut session_meta = SessionMeta {
         id: id.clone(),
         host: meta.host.clone(),
         session: session.clone(),
@@ -455,12 +526,20 @@ fn create_session_inner(app: AppHandle, state: State<AppState>, meta: CreateArgs
         tmux_path: Some(tmux_path.clone()),
         tmux_version,
         socket_name: Some(effective_socket.clone()),
+        tmux_created_at: meta.tmux_created_at
+            .or_else(|| previous_meta.as_ref().and_then(|saved| saved.tmux_created_at)),
         title: meta.title.clone().or_else(|| Some(meta.host.clone())),
         order: 0,
         attach_ok: false,
         color: None, last_tab: None, tab_order: vec![], tab_colors: Default::default(),
         archived: false, archived_at: None,
-        detached: false, recovery_tabs: vec![], restore_pending: false,
+        detached: false,
+        recovery_tabs: if meta.recovery_tabs.is_empty() {
+            vec![]
+        } else {
+            meta.recovery_tabs.clone()
+        },
+        restore_pending: meta.restore_pending,
         recovery_windows: recovery_windows.clone(),
     };
 
@@ -502,7 +581,22 @@ fn create_session_inner(app: AppHandle, state: State<AppState>, meta: CreateArgs
     // A closed session no longer exists remotely. Reconstruct its windows before the normal
     // control client attaches, then clear the one-shot flag so network reconnects never repeat it.
     if persisted_meta.restore_pending {
-        session_recovery::restore(&persisted_meta)?;
+        let _ = write_remote_record(&persisted_meta, RemoteLifecycleState::Restoring);
+        if let Err(error) = session_recovery::restore(&persisted_meta) {
+            let _ = write_remote_record(&persisted_meta, RemoteLifecycleState::Closed);
+            return Err(error);
+        }
+        if let Ok(Some(created)) = tmux_discovery::session_created_at(
+            session_transport,
+            &meta.host,
+            &tmux_path,
+            &effective_socket,
+            &session,
+        ) {
+            persisted_meta.tmux_created_at = Some(created);
+            session_meta.tmux_created_at = Some(created);
+            state.store.update_session(&id, |saved| saved.tmux_created_at = Some(created));
+        }
         state.store.update_session(&id, |saved| {
             saved.restore_pending = false;
             saved.detached = false;
@@ -652,12 +746,36 @@ fn create_session_inner(app: AppHandle, state: State<AppState>, meta: CreateArgs
     dlog!("create_session: spawned backend id={} session={} mode={}", id, session, mode);
     if !meta.host.is_empty() { state.hosts.remember(&meta.host); }   // host history for the dialog
     state.sessions.lock().unwrap().insert(id.clone(), Session { backend, meta: session_meta });
+    if persist {
+        let mut saved = state.store.load().into_iter().find(|saved| saved.id == id);
+        if session_transport == transport::Transport::Local
+            && saved.as_ref().is_some_and(|saved| saved.tmux_created_at.is_none())
+        {
+            if let Ok(Some(created)) = tmux_discovery::session_created_at(
+                session_transport,
+                &meta.host,
+                &tmux_path,
+                &effective_socket,
+                &session,
+            ) {
+                state.store.update_session(&id, |session| session.tmux_created_at = Some(created));
+                if let Some(live) = state.sessions.lock().unwrap().get_mut(&id) {
+                    live.meta.tmux_created_at = Some(created);
+                }
+                if let Some(record) = saved.as_mut() { record.tmux_created_at = Some(created); }
+            }
+        }
+    }
     // Return the tmux path/version actually used, not the ones asked for: a re-probe (unproven
     // cache) may have picked different ones, and `mode` may have been downgraded to plain. The
     // renderer's cached copy has to follow or its next createSession would re-send the stale pair.
+    let tmux_created_at = state.store.load().into_iter()
+        .find(|saved| saved.id == id)
+        .and_then(|saved| saved.tmux_created_at);
     Ok(json!({
         "id": id, "session": session, "mode": mode,
         "tmuxPath": tmux_path, "tmuxVersion": tmux_version, "socketName": effective_socket,
+        "tmuxCreatedAt": tmux_created_at,
     }))
 }
 
@@ -734,6 +852,9 @@ fn session_close_inner(state: &AppState, id: String, tabs: Vec<RecoveryTabHint>)
         title: tab.title,
         last_command: tab.last_command,
     }).collect();
+    // Publish intent before ending tmux. A discovery racing Close will not offer a half-closed
+    // workspace as importable; failure is repaired back to active below.
+    let _ = write_remote_record(&meta, RemoteLifecycleState::Closing);
     // Stop the reconnect supervisor before killing tmux. Otherwise the remote kill can make the
     // supervisor immediately run `new-session -A` and recreate a blank session behind Close.
     if let Some(session) = state.sessions.lock().unwrap().remove(&id) { session.backend.kill(); }
@@ -742,13 +863,11 @@ fn session_close_inner(state: &AppState, id: String, tabs: Vec<RecoveryTabHint>)
         Ok(tabs) => tabs,
         Err(error) => {
             state.store.update_session(&id, |saved| saved.detached = true);
+            let _ = write_remote_record(&meta, RemoteLifecycleState::Active);
             return Err(error);
         }
     };
-    let archived_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
+    let archived_at = epoch_millis();
     state.store.update_session(&id, |saved| {
         saved.archived = true;
         saved.archived_at = Some(archived_at);
@@ -756,6 +875,14 @@ fn session_close_inner(state: &AppState, id: String, tabs: Vec<RecoveryTabHint>)
         saved.recovery_tabs = recovery_tabs;
         saved.restore_pending = true;
     });
+    if let Some(saved) = state.store.load().into_iter().find(|saved| saved.id == id) {
+        // The tmux kill has already succeeded, so a registry failure must not turn Close into a
+        // misleading local failure. The local snapshot remains recoverable and the next attach
+        // will repair the shared record.
+        if let Err(error) = write_remote_record(&saved, RemoteLifecycleState::Closed) {
+            dlog!("remote close state sync failed for {}: {}", saved.session, error);
+        }
+    }
     Ok(())
 }
 
@@ -802,7 +929,7 @@ fn session_kill_inner(state: &AppState, id: String) -> serde_json::Value {
     };
     // History deletion is local: an identically named tmux session may have been started since
     // this snapshot was archived. Never contact or kill it when deleting the saved snapshot.
-    let meta = if saved.as_ref().is_some_and(|s| s.archived) { None } else { meta.or(saved) };
+    let meta = if saved.as_ref().is_some_and(|s| s.archived) { None } else { meta.or(saved.clone()) };
     state.tunnels.forget_session(&id);   // kill removes the session -> forget its persisted ports
 
     let mut killed_remote = false;
@@ -828,18 +955,38 @@ fn session_kill_inner(state: &AppState, id: String) -> serde_json::Value {
         }
     }
     state.store.update(|list| list.retain(|s| s.id != id));
+    if let Some(saved) = saved {
+        if let Err(error) = write_remote_record(&saved, RemoteLifecycleState::Deleted) {
+            dlog!("remote delete state sync failed for {}: {}", saved.session, error);
+        }
+    }
     json!({ "ok": true, "killedRemote": killed_remote })
 }
 
 #[tauri::command]
-fn session_rename(state: State<AppState>, id: String, title: String) -> serde_json::Value {
-    let clean: String = title.trim().chars().take(80).collect();
-    if clean.is_empty() { return json!({ "ok": false }); }
-    if let Some(s) = state.sessions.lock().unwrap().get_mut(&id) {
-        s.meta.title = Some(clean.clone());
-    }
-    state.store.update_session(&id, |session| session.title = Some(clean.clone()));
-    json!({ "ok": true, "title": clean })
+async fn session_rename(app: AppHandle, id: String, title: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let operation = state.lifecycle_lock(&id);
+        let _guard = operation.lock().unwrap();
+        let clean: String = title.trim().chars().take(80).collect();
+        if clean.is_empty() { return json!({ "ok": false }); }
+        if let Some(session) = state.sessions.lock().unwrap().get_mut(&id) {
+            session.meta.title = Some(clean.clone());
+        }
+        state.store.update_session(&id, |session| session.title = Some(clean.clone()));
+        if let Some(saved) = state.store.load().into_iter().find(|saved| saved.id == id) {
+            let lifecycle = if saved.archived {
+                RemoteLifecycleState::Closed
+            } else {
+                RemoteLifecycleState::Active
+            };
+            if let Err(error) = write_remote_record(&saved, lifecycle) {
+                dlog!("remote rename state sync failed for {}: {}", saved.session, error);
+            }
+        }
+        json!({ "ok": true, "title": clean })
+    }).await.map_err(|error| error.to_string())
 }
 
 // §20: persist a new project ORDER (array of session ids, top-to-bottom). Reorders the store

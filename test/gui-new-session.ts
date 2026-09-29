@@ -258,6 +258,57 @@ describe('Tauri UI: new session dialog', () => {
     finish();
   });
 
+  it('imports a closed shared session with its remote recovery recipe', async () => {
+    const { check, finish } = createChecks();
+    const recoveryTabs = [
+      { window: '@1', title: 'editor', cwd: '/srv/project', shell: '/bin/zsh', lastCommand: 'codex' },
+      { window: '@2', title: 'logs', cwd: '/srv/project', shell: '/bin/zsh', lastCommand: 'tail -f app.log' },
+    ];
+    await loadFixture(baseSessions(), {}, {
+      discovery: {
+        tmuxPath: '/usr/bin/tmux', tmuxVersion: [3, 7],
+        sessions: [{
+          socketName: 'dtcc3-7-closed', name: 'closed', title: 'Shared deploy',
+          windows: 2, attached: 0, created: 42, state: 'closed', recoveryTabs,
+        }],
+      },
+      createSessionResult: {
+        id: 'restored-shared', session: 'closed', mode: 'control', tmuxPath: '/usr/bin/tmux',
+        tmuxVersion: [3, 7], socketName: 'dtcc3-7-closed', ready: true,
+      },
+    });
+    await openDialog();
+    await js(`document.getElementById('f-host').value = 'dev@example.test'`);
+    await $('#f-import-mode').click();
+    await $('#f-discover').click();
+    await browser.waitUntil(async () => js(
+      `document.querySelectorAll('#tmux-discovery .discovered-session').length === 1`));
+
+    const option = await js(`({
+      name: document.querySelector('#tmux-discovery .session-name').textContent,
+      detail: document.querySelector('#tmux-discovery .session-meta').title,
+    })`);
+    check(option.name === 'Shared deploy' && option.detail.includes('restore when imported'),
+      `TC-NS7b closed registry entry is presented as recovery, not a live client (got ${JSON.stringify(option)})`);
+    await js(`document.querySelector('#tmux-discovery .discovered-session').click()`);
+    await submitCreate();
+    await browser.waitUntil(async () => (await newSessionCalls()).length === 1);
+    const sent = (await newSessionCalls())[0]?.[1]?.meta as undefined | {
+      session?: string;
+      socketName?: string;
+      restorePending?: boolean;
+      recoveryTabs?: Array<{ window?: string; cwd?: string; lastCommand?: string }>;
+    };
+    check(sent?.session === 'closed' && sent?.socketName === 'dtcc3-7-closed'
+      && sent?.restorePending === true
+      && sent?.recoveryTabs?.length === 2
+      && sent.recoveryTabs[0]?.window === '@1' && sent.recoveryTabs[0]?.cwd === '/srv/project'
+      && sent.recoveryTabs[0]?.lastCommand === 'codex'
+      && sent.recoveryTabs[1]?.window === '@2' && sent.recoveryTabs[1]?.lastCommand === 'tail -f app.log',
+    `TC-NS7b closed import forwards the shared recovery recipe (got ${JSON.stringify(sent)})`);
+    finish();
+  });
+
   it('shows an empty import state when every discovered session is already open', async () => {
     const { check, finish } = createChecks();
     const openSession = (n: number, name: string) => ({

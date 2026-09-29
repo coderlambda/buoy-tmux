@@ -59,6 +59,10 @@ pub struct SessionMeta {
     /// ordinary tmux server, so Buoy and existing terminal clients see the same session.
     #[serde(default, alias = "socket_name")]
     pub socket_name: Option<String>,
+    /// tmux's session_created value. It prevents an old registry row from being applied to a
+    /// different session that later reused the same socket/name pair.
+    #[serde(default, alias = "tmux_created_at")]
+    pub tmux_created_at: Option<u64>,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -322,6 +326,7 @@ mod tests {
             transport: "ssh".into(), mode: "control".into(),
             tmux_path: Some("/t".into()), tmux_version: Some((3, 7)),
             socket_name: None,
+            tmux_created_at: None,
             title: Some("x".into()), order: 0, attach_ok: false,
             color: None, last_tab: None, tab_order: vec![], tab_colors: Default::default(),
             archived: false, archived_at: None,
@@ -350,6 +355,7 @@ mod tests {
             transport: "local".into(), mode: mode.into(),
             tmux_path: Some("/opt/homebrew/bin/tmux".into()), tmux_version: Some((3, 6)),
             socket_name: None,
+            tmux_created_at: None,
             title: Some("local".into()), order: 0, attach_ok: false,
             color: None, last_tab: None, tab_order: vec![], tab_colors: Default::default(),
             archived: false, archived_at: None,
@@ -402,6 +408,7 @@ mod tests {
             transport: "ssh".into(), mode: "control".into(),
             tmux_path: Some("/usr/bin/tmux".into()), tmux_version: Some((3, 7)),
             socket_name: None,
+            tmux_created_at: None,
             title: Some(id.into()), order, attach_ok: false,
             color: None, last_tab: None, tab_order: vec![], tab_colors: Default::default(),
             archived: false, archived_at: None,
@@ -438,7 +445,7 @@ mod tests {
             color: None, last_tab: Some("@2".into()), tab_order: vec!["@1".into(), "@2".into()],
             tab_colors: Default::default(), archived: false, archived_at: None,
             detached: false, recovery_tabs: vec![], restore_pending: false,
-            socket_name: None, recovery_windows: vec![],
+            socket_name: None, tmux_created_at: None, recovery_windows: vec![],
         };
         store.save(&[original]);
         assert!(store.set_archived("resume-me", true, Some(1234)));
@@ -470,6 +477,7 @@ mod tests {
             transport: "ssh".into(), mode: "control".into(),
             tmux_path: None, tmux_version: None, title: Some(id.into()), order,
             socket_name: None,
+            tmux_created_at: None,
             attach_ok: false, color: color.map(String::from), last_tab: Some("@2".into()),
             tab_order: vec!["@2".into(), "@0".into()],
             tab_colors: [("@0".to_string(), "#89b4fa".to_string())].into_iter().collect(),

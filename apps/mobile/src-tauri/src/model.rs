@@ -39,6 +39,8 @@ pub struct SessionMeta {
     #[serde(default)]
     pub socket_name: String,
     #[serde(default)]
+    pub tmux_created_at: Option<u64>,
+    #[serde(default)]
     pub order: i64,
     #[serde(default)]
     pub color: Option<String>,
@@ -121,6 +123,11 @@ pub struct CreateArgs {
     pub tmux_path: Option<String>,
     pub tmux_version: Option<Vec<u32>>,
     pub socket_name: Option<String>,
+    pub tmux_created_at: Option<u64>,
+    #[serde(default)]
+    pub recovery_tabs: Vec<RecoveryTab>,
+    #[serde(default)]
+    pub restore_pending: bool,
     pub ssh_password: Option<String>,
 }
 
@@ -166,6 +173,7 @@ mod tests {
             tmux_path: String::new(),
             tmux_version: None,
             socket_name: String::new(),
+            tmux_created_at: None,
             order: 0,
             color: None,
             last_tab: None,
@@ -199,6 +207,7 @@ mod tests {
             tmux_path: tmux_command(),
             tmux_version: Some(vec![3, 7]),
             socket_name: "buoy-mobile-dt-mobile".into(),
+            tmux_created_at: None,
             order: 0,
             color: None,
             last_tab: None,
@@ -227,6 +236,7 @@ mod tests {
             tmux_path: tmux_command(),
             tmux_version: None,
             socket_name: "dtcc-dt-shared".into(),
+            tmux_created_at: None,
             order: 0,
             color: None,
             last_tab: None,

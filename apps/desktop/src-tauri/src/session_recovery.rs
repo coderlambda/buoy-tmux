@@ -378,6 +378,7 @@ mod tests {
             tmux_path: Some(probe.tmux_path.clone()),
             tmux_version: Some(version),
             socket_name: None,
+            tmux_created_at: None,
             title: Some("recovery".into()),
             order: 0,
             attach_ok: true,

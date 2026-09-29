@@ -59,6 +59,11 @@ use store::MobileStore;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 use tunnel::{ActiveTunnel, TunnelBook};
+use buoy_core::{
+    RemoteLifecycleState, RemoteRecoveryTab, RemoteSessionDisplay, RemoteSessionIdentity,
+    RemoteSessionLifecycle, RemoteSessionRecord, RemoteSessionRecovery, RemoteSessionRuntime,
+    REMOTE_STATE_SCHEMA_VERSION,
+};
 
 #[derive(Clone)]
 struct ConnectionSpec {
@@ -81,6 +86,7 @@ enum SessionCommand {
         hints: Vec<RecoveryTab>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    SyncTitle(String),
     TabNew,
     TabSelect(String),
     TabClose(String),
@@ -113,6 +119,42 @@ struct AppState {
     tunnels: Arc<TunnelBook>,
     previews: preview::PreviewStore,
     next_runtime_id: AtomicU64,
+}
+
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn remote_record(meta: &SessionMeta, lifecycle: RemoteLifecycleState) -> RemoteSessionRecord {
+    let updated_at = epoch_millis();
+    RemoteSessionRecord {
+        schema_version: REMOTE_STATE_SCHEMA_VERSION,
+        revision: updated_at,
+        identity: RemoteSessionIdentity {
+            socket_name: meta.socket_name.clone(),
+            session: meta.session.clone(),
+            tmux_created_at: meta.tmux_created_at,
+        },
+        runtime: RemoteSessionRuntime {
+            mode: meta.mode.clone(),
+            tmux_path: meta.tmux_path.clone(),
+            tmux_version: meta.tmux_version.clone(),
+        },
+        display: RemoteSessionDisplay { title: meta.title.clone() },
+        lifecycle: RemoteSessionLifecycle { state: lifecycle, updated_at },
+        recovery: RemoteSessionRecovery {
+            tabs: meta.recovery_tabs.iter().map(|tab| RemoteRecoveryTab {
+                window: tab.window.clone(),
+                title: tab.title.clone(),
+                cwd: tab.cwd.clone(),
+                shell: tab.shell.clone(),
+                last_command: tab.last_command.clone(),
+            }).collect(),
+        },
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -366,14 +408,25 @@ async fn run_connection(
 
     let socket = spec.meta.socket_name.clone();
     if spec.meta.restore_pending {
-        remote::restore_tmux_session(
+        let _ = remote::write_remote_record(
+            &ssh,
+            &remote_record(&spec.meta, RemoteLifecycleState::Restoring),
+        ).await;
+        let restore = remote::restore_tmux_session(
             &ssh,
             &spec.meta.session,
             &socket,
             &spec.meta.tmux_path,
             &spec.meta.recovery_tabs,
             spec.meta.last_tab.as_deref(),
-        ).await?;
+        ).await;
+        if let Err(error) = restore {
+            let _ = remote::write_remote_record(
+                &ssh,
+                &remote_record(&spec.meta, RemoteLifecycleState::Closed),
+            ).await;
+            return Err(error);
+        }
         spec.meta.restore_pending = false;
         spec.meta.detached = false;
         state.store.upsert_session(spec.meta.clone())?;
@@ -398,9 +451,30 @@ async fn run_connection(
         .await
         .map_err(|error| format!("start remote tmux failed: {error}"))?;
 
+    if let Ok(Some(created)) = remote::session_created_at(
+        &ssh,
+        &spec.meta.tmux_path,
+        &socket,
+        &spec.meta.session,
+    ).await {
+        spec.meta.tmux_created_at = Some(created);
+        state.store.upsert_session(spec.meta.clone())?;
+        if let Ok(mut sessions) = state.sessions.lock() {
+            if let Some(session) = sessions.get_mut(&id) {
+                session.spec.meta.tmux_created_at = Some(created);
+            }
+        }
+    }
+
     emit_state(&app, &id, "connected");
     let mut control = use_control.then(|| ControlEngine::new(spec.meta.session.clone()));
     if control.is_none() {
+        // Metadata sync is deliberately best-effort: a read-only home directory must not make an
+        // otherwise healthy SSH terminal unusable. A later attach or rename repairs the record.
+        let _ = remote::write_remote_record(
+            &ssh,
+            &remote_record(&spec.meta, RemoteLifecycleState::Active),
+        ).await;
         let _ = app.emit("session:ready", json!({ "id": id }));
         if let Some(startup) = startup.take() {
             let _ = startup.send(Ok(spec.meta.clone()));
@@ -505,31 +579,52 @@ async fn run_connection(
                         &socket,
                         &spec.meta.tmux_path,
                     ).await;
+                    let _ = remote::write_remote_record(
+                        &ssh,
+                        &remote_record(&spec.meta, RemoteLifecycleState::Deleted),
+                    ).await;
                     let _ = state.store.remove_session(&id);
                     intentional = true;
                     let _ = channel.close().await;
                     break;
                 }
                 Some(SessionCommand::CloseRemote { hints, reply }) => {
+                    let _ = remote::write_remote_record(
+                        &ssh,
+                        &remote_record(&spec.meta, RemoteLifecycleState::Closing),
+                    ).await;
                     let result = remote::snapshot_and_kill(
                         &ssh,
                         &spec.meta.session,
                         &socket,
                         &spec.meta.tmux_path,
                         &hints,
-                    ).await.and_then(|recovery_tabs| {
-                        let archived_at = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|duration| duration.as_millis() as u64)
-                            .unwrap_or(0);
-                        state.store.update_session(&id, |saved| {
-                            saved.archived = true;
-                            saved.archived_at = Some(archived_at);
-                            saved.detached = false;
-                            saved.recovery_tabs = recovery_tabs;
-                            saved.restore_pending = true;
-                        }).map(|_| ())
-                    });
+                    ).await;
+                    let result = match result {
+                        Ok(recovery_tabs) => {
+                            let archived_at = epoch_millis();
+                            spec.meta.archived = true;
+                            spec.meta.archived_at = Some(archived_at);
+                            spec.meta.detached = false;
+                            spec.meta.recovery_tabs = recovery_tabs;
+                            spec.meta.restore_pending = true;
+                            let saved = state.store.upsert_session(spec.meta.clone());
+                            if saved.is_ok() {
+                                let _ = remote::write_remote_record(
+                                    &ssh,
+                                    &remote_record(&spec.meta, RemoteLifecycleState::Closed),
+                                ).await;
+                            }
+                            saved
+                        }
+                        Err(error) => {
+                            let _ = remote::write_remote_record(
+                                &ssh,
+                                &remote_record(&spec.meta, RemoteLifecycleState::Active),
+                            ).await;
+                            Err(error)
+                        }
+                    };
                     if result.is_err() {
                         let _ = state.store.update_session(&id, |saved| saved.detached = true);
                     }
@@ -537,6 +632,13 @@ async fn run_connection(
                     intentional = true;
                     let _ = channel.close().await;
                     break;
+                }
+                Some(SessionCommand::SyncTitle(title)) => {
+                    spec.meta.title = title;
+                    let _ = remote::write_remote_record(
+                        &ssh,
+                        &remote_record(&spec.meta, RemoteLifecycleState::Active),
+                    ).await;
                 }
                 Some(SessionCommand::Detach) | None => {
                     intentional = true;
@@ -569,6 +671,10 @@ async fn run_connection(
                         let became_ready = actions.iter().any(|action| matches!(action, ControlAction::Ready));
                         if send_control_actions(&app, &id, &mut channel, actions, &mut pending_data).await? { break; }
                         if became_ready {
+                            let _ = remote::write_remote_record(
+                                &ssh,
+                                &remote_record(&spec.meta, RemoteLifecycleState::Active),
+                            ).await;
                             if let Some(startup) = startup.take() {
                                 let _ = startup.send(Ok(spec.meta.clone()));
                             }
@@ -886,6 +992,8 @@ async fn create_session(
         tmux_path: meta.tmux_path.unwrap_or_else(|| "tmux".into()),
         tmux_version: meta.tmux_version,
         socket_name: socket_name.clone(),
+        tmux_created_at: meta.tmux_created_at
+            .or_else(|| persisted.as_ref().and_then(|session| session.tmux_created_at)),
         order,
         color: persisted.as_ref().and_then(|session| session.color.clone()),
         last_tab: persisted
@@ -902,13 +1010,13 @@ async fn create_session(
         archived: false,
         archived_at: None,
         detached: false,
-        recovery_tabs: persisted
-            .as_ref()
-            .map(|session| session.recovery_tabs.clone())
-            .unwrap_or_default(),
-        restore_pending: persisted
-            .as_ref()
-            .is_some_and(|session| session.restore_pending),
+        recovery_tabs: if meta.recovery_tabs.is_empty() {
+            persisted.as_ref().map(|session| session.recovery_tabs.clone()).unwrap_or_default()
+        } else {
+            meta.recovery_tabs
+        },
+        restore_pending: meta.restore_pending
+            || persisted.as_ref().is_some_and(|session| session.restore_pending),
     };
     state.store.upsert_session(session_meta.clone())?;
     state.store.remember_host(&meta.host)?;
@@ -934,6 +1042,7 @@ async fn create_session(
         "tmuxPath": connected_meta.tmux_path,
         "tmuxVersion": connected_meta.tmux_version,
         "socketName": connected_meta.socket_name,
+        "tmuxCreatedAt": connected_meta.tmux_created_at,
         "ready": true,
     }))
 }
@@ -994,15 +1103,57 @@ fn session_resume(state: State<Arc<AppState>>, id: String) -> Result<(), String>
     if updated.is_some() { Ok(()) } else { Err("unknown session".into()) }
 }
 
+async fn write_disconnected_tombstone(
+    state: &Arc<AppState>,
+    meta: &SessionMeta,
+) -> Result<(), String> {
+    let target = buoy_core::parse_ssh_target(&meta.host)?;
+    let user = target.user.ok_or_else(|| "mobile SSH requires user@host".to_string())?;
+    let endpoint = format!("{}:{}", target.host, target.port);
+    let config = client::Config {
+        inactivity_timeout: Some(Duration::from_secs(15)),
+        keepalive_interval: Some(Duration::from_secs(5)),
+        keepalive_max: 1,
+        nodelay: true,
+        ..Default::default()
+    };
+    let ssh = tokio::time::timeout(
+        Duration::from_secs(10),
+        client::connect(
+            Arc::new(config),
+            (target.host.as_str(), target.port),
+            SshHandler { store: state.store.clone(), endpoint },
+        ),
+    ).await.map_err(|_| "SSH metadata connection timed out".to_string())?
+        .map_err(|error| format!("SSH metadata connection failed: {error}"))?;
+    let ssh = tokio::time::timeout(Duration::from_secs(12), authenticate(ssh, user, None))
+        .await
+        .map_err(|_| "SSH metadata authentication timed out".to_string())??;
+    let result = remote::write_remote_record(
+        &ssh,
+        &remote_record(meta, RemoteLifecycleState::Deleted),
+    ).await;
+    let _ = ssh.disconnect(Disconnect::ByApplication, "", "English").await;
+    result
+}
+
 #[tauri::command]
-fn session_kill(state: State<Arc<AppState>>, id: String) -> serde_json::Value {
+async fn session_kill(state: State<'_, Arc<AppState>>, id: String) -> Result<serde_json::Value, String> {
+    let saved = state.store.session(&id).ok_or_else(|| "unknown session".to_string())?;
+    let mut live = false;
     if let Ok(mut sessions) = state.sessions.lock() {
         if let Some(session) = sessions.remove(&id) {
             let _ = session.commands.send(SessionCommand::KillRemote);
+            live = true;
         }
     }
-    let _ = state.store.remove_session(&id);
-    json!({ "killedRemote": true })
+    if !live {
+        // A History row has no foreground SSH runtime. Update the host registry before discarding
+        // the only local copy, so it cannot reappear on the next cross-device discovery.
+        write_disconnected_tombstone(&state, &saved).await?;
+    }
+    state.store.remove_session(&id)?;
+    Ok(json!({ "killedRemote": live }))
 }
 
 fn reconnect(app: AppHandle, state: &Arc<AppState>, id: &str) -> Result<(), String> {
@@ -1051,6 +1202,7 @@ fn session_rename(state: State<Arc<AppState>>, id: String, title: String) -> ser
     if let Ok(mut sessions) = state.sessions.lock() {
         if let Some(session) = sessions.get_mut(&id) {
             session.spec.meta.title = clean.clone();
+            let _ = session.commands.send(SessionCommand::SyncTitle(clean.clone()));
         }
     }
     json!({ "ok": true, "title": clean })

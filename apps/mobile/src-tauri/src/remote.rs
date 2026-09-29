@@ -4,6 +4,7 @@ use russh::{client, ChannelMsg};
 use serde::Serialize;
 
 use crate::model::RecoveryTab;
+use buoy_core::{RemoteLifecycleState, RemoteRecoveryTab, RemoteSessionRecord};
 
 pub const DOWNLOAD_CAP: usize = 5 * 1024 * 1024;
 
@@ -118,6 +119,11 @@ pub struct DiscoveredSession {
     pub windows: u32,
     pub attached: u32,
     pub created: u64,
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_tabs: Vec<RemoteRecoveryTab>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +163,9 @@ fn parse_discovered_sessions(stdout: &[u8]) -> Vec<DiscoveredSession> {
             windows,
             attached,
             created,
+            state: "active",
+            title: None,
+            recovery_tabs: vec![],
         });
     }
     sessions.sort_by(|left, right| {
@@ -166,6 +175,46 @@ fn parse_discovered_sessions(stdout: &[u8]) -> Vec<DiscoveredSession> {
             .then_with(|| left.name.cmp(&right.name))
     });
     sessions
+}
+
+fn merge_remote_records(sessions: &mut Vec<DiscoveredSession>, records: Vec<RemoteSessionRecord>) {
+    let mut newest = std::collections::BTreeMap::new();
+    for record in records {
+        let key = (record.identity.socket_name.clone(), record.identity.session.clone());
+        if newest
+            .get(&key)
+            .map_or(true, |old: &RemoteSessionRecord| old.revision <= record.revision)
+        {
+            newest.insert(key, record);
+        }
+    }
+    for session in sessions.iter_mut() {
+        let key = (session.socket_name.clone(), session.name.clone());
+        let Some(record) = newest.remove(&key) else { continue };
+        let same_instance = record.identity.tmux_created_at
+            .map_or(true, |created| created == session.created);
+        if same_instance && record.lifecycle.state != RemoteLifecycleState::Deleted {
+            session.title = Some(record.display.title);
+        }
+    }
+    for (_, record) in newest {
+        if record.lifecycle.state != RemoteLifecycleState::Closed || record.recovery.tabs.is_empty() {
+            continue;
+        }
+        sessions.push(DiscoveredSession {
+            socket_name: record.identity.socket_name,
+            name: record.identity.session,
+            windows: record.recovery.tabs.len() as u32,
+            attached: 0,
+            created: record.identity.tmux_created_at.unwrap_or(0),
+            state: "closed",
+            title: Some(record.display.title),
+            recovery_tabs: record.recovery.tabs,
+        });
+    }
+    sessions.sort_by(|left, right| {
+        right.created.cmp(&left.created).then_with(|| left.name.cmp(&right.name))
+    });
 }
 
 /// Discover sessions on the ordinary tmux server and every Buoy socket. The socket is part of each
@@ -179,14 +228,18 @@ pub async fn discover_tmux_sessions<H: client::Handler>(
     // sessions use buoy-core's platform-neutral dtcc/dtapp identity.
     let command = format!(
         "buoy_root=${{TMUX_TMPDIR:-/tmp}}; buoy_dir=\"$buoy_root/tmux-$(id -u)\"; \
-         [ -d \"$buoy_dir\" ] || exit 0; \
-         for buoy_path in \"$buoy_dir/default\" \"$buoy_dir\"/dtcc* \"$buoy_dir\"/dtapp* \"$buoy_dir\"/buoy-mobile-*; do \
-           [ -S \"$buoy_path\" ] || continue; buoy_socket=${{buoy_path##*/}}; \
-           case \"$buoy_socket\" in default|dtcc*|dtapp*|buoy-mobile-*) ;; *) continue ;; esac; \
-           {tmux_path} -S \"$buoy_path\" list-sessions -F \"$buoy_socket\t#{{session_name}}\t#{{session_windows}}\t#{{session_attached}}\t#{{session_created}}\" 2>/dev/null || :; \
-         done"
+         if [ -d \"$buoy_dir\" ]; then \
+           for buoy_path in \"$buoy_dir/default\" \"$buoy_dir\"/dtcc* \"$buoy_dir\"/dtapp* \"$buoy_dir\"/buoy-mobile-*; do \
+             [ -S \"$buoy_path\" ] || continue; buoy_socket=${{buoy_path##*/}}; \
+             case \"$buoy_socket\" in default|dtcc*|dtapp*|buoy-mobile-*) ;; *) continue ;; esac; \
+             {tmux_path} -S \"$buoy_path\" list-sessions -F \"$buoy_socket\t#{{session_name}}\t#{{session_windows}}\t#{{session_attached}}\t#{{session_created}}\" 2>/dev/null || :; \
+           done; \
+         fi; {}",
+        buoy_core::remote_state_list_script()
     );
-    let output = execute(ssh, command, 256 * 1024).await?;
+    // Registry JSON is base64-framed after live tmux rows. buoy-core caps its raw aggregate at
+    // 1 MiB; leave room for base64 expansion and the live rows without allowing unbounded output.
+    let output = execute(ssh, command, 2 * 1024 * 1024).await?;
     let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if output.status != Some(0) && !(output.status.is_none() && diagnostic.is_empty()) {
         return Err(if diagnostic.is_empty() {
@@ -195,11 +248,54 @@ pub async fn discover_tmux_sessions<H: client::Handler>(
             diagnostic
         });
     }
+    let mut sessions = parse_discovered_sessions(&output.stdout);
+    merge_remote_records(
+        &mut sessions,
+        buoy_core::parse_remote_state_listing(&output.stdout),
+    );
     Ok(DiscoveryResult {
         tmux_path,
         tmux_version,
-        sessions: parse_discovered_sessions(&output.stdout),
+        sessions,
     })
+}
+
+pub async fn write_remote_record<H: client::Handler>(
+    ssh: &client::Handle<H>,
+    record: &RemoteSessionRecord,
+) -> Result<(), String> {
+    let script = buoy_core::remote_state_write_script(record)?;
+    let output = execute(ssh, script, 64 * 1024).await?;
+    if output.status == Some(0) || (output.status.is_none() && output.stderr.is_empty()) {
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if error.is_empty() { "could not update remote Buoy state".into() } else { error })
+    }
+}
+
+pub async fn session_created_at<H: client::Handler>(
+    ssh: &client::Handle<H>,
+    tmux_path: &str,
+    socket: &str,
+    session: &str,
+) -> Result<Option<u64>, String> {
+    if !safe_tmux_path(tmux_path) {
+        return Err("remote tmux path was invalid".into());
+    }
+    buoy_core::validate_socket_name(socket)?;
+    buoy_core::validate_session_name(session)?;
+    let command = format!(
+        "buoy_try=0; while [ \"$buoy_try\" -lt 20 ]; do \
+           buoy_created=$({tmux_path} -L {socket} display-message -p -t {session} '#{{session_created}}' 2>/dev/null) && break; \
+           buoy_try=$((buoy_try + 1)); sleep 0.1; \
+         done; case \"$buoy_created\" in ''|*[!0-9]*) exit 0 ;; *) printf '%s\\n' \"$buoy_created\" ;; esac"
+    );
+    let output = execute(ssh, command, 16 * 1024).await?;
+    if output.status != Some(0) && output.status.is_some() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().parse().ok())
 }
 
 pub async fn read_file<H: client::Handler>(
@@ -474,6 +570,37 @@ pub async fn has_tmux_session<H: client::Handler>(
 mod tests {
     use super::*;
 
+    fn closed_record() -> RemoteSessionRecord {
+        RemoteSessionRecord {
+            schema_version: buoy_core::REMOTE_STATE_SCHEMA_VERSION,
+            revision: 5,
+            identity: buoy_core::RemoteSessionIdentity {
+                socket_name: "dtcc3-7-closed".into(),
+                session: "closed".into(),
+                tmux_created_at: Some(12),
+            },
+            runtime: buoy_core::RemoteSessionRuntime {
+                mode: "control".into(),
+                tmux_path: "/usr/bin/tmux".into(),
+                tmux_version: Some(vec![3, 7]),
+            },
+            display: buoy_core::RemoteSessionDisplay { title: "Closed workspace".into() },
+            lifecycle: buoy_core::RemoteSessionLifecycle {
+                state: RemoteLifecycleState::Closed,
+                updated_at: 5,
+            },
+            recovery: buoy_core::RemoteSessionRecovery {
+                tabs: vec![RemoteRecoveryTab {
+                    window: "@1".into(),
+                    title: "shell".into(),
+                    cwd: "/tmp".into(),
+                    shell: "/bin/zsh".into(),
+                    last_command: String::new(),
+                }],
+            },
+        }
+    }
+
     #[test]
     fn parses_tmux_versions_used_for_control_mode() {
         assert_eq!(parse_tmux_version("tmux 3.4"), Some(vec![3, 4]));
@@ -498,5 +625,16 @@ mod tests {
         assert_eq!(sessions[0].windows, 3);
         assert_eq!(sessions[0].attached, 2);
         assert_eq!(sessions[0].socket_name, "dtcc3-7-new");
+    }
+
+    #[test]
+    fn mobile_discovery_surfaces_shared_closed_recovery() {
+        let mut sessions = Vec::new();
+        merge_remote_records(&mut sessions, vec![closed_record()]);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "closed");
+        assert_eq!(sessions[0].state, "closed");
+        assert_eq!(sessions[0].title.as_deref(), Some("Closed workspace"));
+        assert_eq!(sessions[0].recovery_tabs[0].cwd, "/tmp");
     }
 }

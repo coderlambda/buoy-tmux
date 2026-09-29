@@ -333,6 +333,16 @@ supervisor:
 > below explains why terminal-stream inference was rejected; the Tauri backend now has the required
 > out-of-band command path.
 
+Desktop and Mobile also share non-secret session identity and explicit-Close recovery data through
+the tmux host at `$HOME/.buoy/v1/sessions/<socket>/<session>.json`. Each record is schema-versioned,
+bounded, validated as untrusted input, written with mode `0600` by atomic same-directory rename,
+and held below `0700` directories. tmux remains authoritative for live sessions and windows. The
+registry contributes display titles and `active` / `closing` / `closed` / `restoring` / `deleted`
+lifecycle state; a closed record carries the shell/cwd recipe needed to import it on another client.
+Credentials, host keys, selected session/tab, custom ordering and colors stay device-local. The
+`tmuxCreatedAt` identity guard prevents metadata for an old session from decorating a later tmux
+session that reused the same socket and name.
+
 - Persist `[{ id, host, session, title, order, lastActive }]` to disk at
   `app.getPath('userData')`. **Treat this file as untrusted input on load** — re-validate
   `host`/`session` (§6) before use.

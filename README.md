@@ -82,6 +82,8 @@ Screenshots show the v0.1.4 interface with demonstration workspaces.
 
 - **Shared sessions:** Desktop and Mobile discover the same local or remote tmux sessions, preserve
   their real socket identity, and may attach concurrently without detaching existing clients.
+  Non-secret titles, lifecycle and Close recovery recipes are shared on the host under
+  `~/.buoy/v1`; credentials and device preferences remain local.
 - **Session history:** Detach closes only Buoy's client. End saves a recovery snapshot and
   ends tmux; Restore rebuilds shells in their last directories. It does not restore process
   memory or unsaved application state.

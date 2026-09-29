@@ -25,6 +25,7 @@ export interface SessionMeta {
   tmuxPath?: string;
   tmuxVersion?: number[];
   socketName?: string;
+  tmuxCreatedAt?: number;
   order?: number;
   color?: string | null;
   lastTab?: string | null;
@@ -66,6 +67,10 @@ export interface CreateSessionMeta {
   tmuxPath?: string;
   tmuxVersion?: number[];
   socketName?: string;
+  /** Recovery recipe imported from the host-wide Buoy registry for a closed workspace. */
+  recoveryTabs?: RecoveryTabSnapshot[];
+  restorePending?: boolean;
+  tmuxCreatedAt?: number;
   /** Ephemeral SSH credential for runtimes without an OS ssh-agent. Never persisted in SessionMeta. */
   sshPassword?: string;
 }
@@ -77,6 +82,7 @@ export interface CreateSessionResult {
   tmuxPath?: string;
   tmuxVersion?: number[];
   socketName?: string;
+  tmuxCreatedAt?: number;
   /** The runtime completed its initial attach and input gate before resolving createSession. */
   ready?: boolean;
 }
@@ -87,6 +93,10 @@ export interface DiscoveredTmuxSession {
   windows: number;
   attached: number;
   created: number;
+  /** `closed` entries come from ~/.buoy and will be reconstructed when imported. */
+  state?: 'active' | 'closed';
+  title?: string;
+  recoveryTabs?: RecoveryTabSnapshot[];
 }
 
 export interface TmuxDiscoveryResult {
