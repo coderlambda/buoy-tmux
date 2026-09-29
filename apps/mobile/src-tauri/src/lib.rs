@@ -27,7 +27,7 @@ mod claude_integration {
         control: bool,
     ) -> String {
         let control = if control { " -CC" } else { "" };
-        format!("exec {tmux_path}{control} -L {socket} new-session -D -A -s {session}")
+        format!("exec {tmux_path}{control} -L {socket} new-session -A -s {session}")
     }
 }
 
@@ -347,13 +347,16 @@ async fn run_connection(
             .await
             .map_err(|_| "remote tmux probe timed out".to_string())??;
     spec.meta.tmux_path = tmux_path;
-    spec.meta.tmux_version = tmux_version;
-    let control_supported = spec.meta.tmux_version.as_deref().is_some_and(|version| {
+    let control_supported = tmux_version.as_deref().is_some_and(|version| {
         version.first().copied().unwrap_or(0) > 3
             || (version.first() == Some(&3) && version.get(1).copied().unwrap_or(0) >= 2)
     });
     let use_control = spec.meta.mode == "control" && control_supported;
-    spec.meta.mode = if use_control { "control" } else { "plain" }.into();
+    model::apply_tmux_identity(
+        &mut spec.meta,
+        if use_control { "control" } else { "plain" },
+        tmux_version.unwrap_or_default(),
+    );
     state.store.upsert_session(spec.meta.clone())?;
     if let Ok(mut sessions) = state.sessions.lock() {
         if let Some(session) = sessions.get_mut(&id) {
@@ -824,7 +827,7 @@ async fn create_session(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis().to_string())
-            .unwrap_or_else(|_| "mobile".into())
+            .unwrap_or_else(|_| "session".into())
     });
     let session = meta.session.unwrap_or_else(|| {
         let tail = id
@@ -836,12 +839,20 @@ async fn create_session(
             .into_iter()
             .rev()
             .collect::<String>();
-        format!("dt-{}", if tail.is_empty() { "mobile" } else { &tail })
+        format!("dt-{}", if tail.is_empty() { "session" } else { &tail })
     });
     buoy_core::validate_session_name(&session)?;
-    let socket_name = meta
-        .socket_name
-        .unwrap_or_else(|| format!("buoy-mobile-{session}"));
+    let mode = meta
+        .mode
+        .filter(|mode| mode == "plain" || mode == "control")
+        .unwrap_or_else(|| "control".into());
+    let socket_name = meta.socket_name.unwrap_or_else(|| {
+        buoy_core::tmux_socket_name(
+            &mode,
+            model::tmux_version_pair(meta.tmux_version.as_deref()),
+            &session,
+        )
+    });
     buoy_core::validate_socket_name(&socket_name)?;
 
     let previous = state
@@ -867,10 +878,7 @@ async fn create_session(
         session: session.clone(),
         kind: "remote".into(),
         transport: "ssh".into(),
-        mode: meta
-            .mode
-            .filter(|mode| mode == "plain" || mode == "control")
-            .unwrap_or_else(|| "control".into()),
+        mode,
         title: meta
             .title
             .filter(|title| !title.trim().is_empty())

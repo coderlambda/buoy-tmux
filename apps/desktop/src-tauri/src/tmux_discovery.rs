@@ -1,6 +1,6 @@
-//! Discover sessions on a user's ordinary (`-L default`) tmux server and rebuild a saved window
-//! recipe when a server disappeared after a host reboot. All remote scripts are base64-wrapped;
-//! renderer values never become shell syntax.
+//! Discover sessions on the ordinary tmux server plus Buoy's client-neutral private sockets, and
+//! rebuild a saved window recipe when a server disappeared after a host reboot. All remote scripts
+//! are base64-wrapped; renderer values never become shell syntax.
 
 use std::process::{Command, Output};
 
@@ -11,13 +11,13 @@ use crate::session_store::RecoveryWindow;
 use crate::transport::Transport;
 use crate::validation::{self, base64_encode, parse_host, validate_session};
 
-const DEFAULT_SOCKET: &str = "default";
 const LIST_FORMAT: &str =
     "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredSession {
+    pub socket_name: String,
     pub name: String,
     pub windows: u32,
     pub attached: u32,
@@ -66,19 +66,39 @@ fn remote_output(raw_host: &str, script: &str) -> Result<Output, String> {
         .map_err(|e| format!("could not run ssh: {e}"))
 }
 
-fn local_output(tmux_path: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new(tmux_path)
-        .args(args)
+fn local_output(script: &str) -> Result<Output, String> {
+    Command::new("/bin/sh")
+        .args(["-c", script])
         .env("PATH", crate::augmented_path())
         .output()
-        .map_err(|e| format!("could not run tmux: {e}"))
+        .map_err(|e| format!("could not inspect tmux sockets: {e}"))
+}
+
+fn discovery_script(tmux_path: &str) -> String {
+    // `buoy-mobile-*` is discovery-only compatibility for sessions created by older Mobile builds.
+    // New Desktop and Mobile builds both use the same dtcc/dtapp names from buoy-core.
+    format!(
+        "buoy_root=${{TMUX_TMPDIR:-/tmp}}; buoy_dir=\"$buoy_root/tmux-$(id -u)\"; \
+         [ -d \"$buoy_dir\" ] || exit 0; \
+         for buoy_path in \"$buoy_dir/default\" \"$buoy_dir\"/dtcc* \"$buoy_dir\"/dtapp* \"$buoy_dir\"/buoy-mobile-*; do \
+           [ -S \"$buoy_path\" ] || continue; buoy_socket=${{buoy_path##*/}}; \
+           case \"$buoy_socket\" in default|dtcc*|dtapp*|buoy-mobile-*) ;; *) continue ;; esac; \
+           {tmux_path} -S \"$buoy_path\" list-sessions -F \"$buoy_socket\t{LIST_FORMAT}\" 2>/dev/null || :; \
+         done"
+    )
 }
 
 fn parse_sessions(stdout: &[u8]) -> Vec<DiscoveredSession> {
     let text = String::from_utf8_lossy(stdout);
     let mut sessions = Vec::new();
     for line in text.lines() {
-        let mut fields = line.splitn(4, '\t');
+        let mut fields = line.splitn(5, '\t');
+        let Some(socket_name) = fields.next() else {
+            continue;
+        };
+        if buoy_core::validate_socket_name(socket_name).is_err() {
+            continue;
+        }
         let Some(name) = fields.next() else { continue };
         // Imported names flow through the same remote bootstrap as created names. Keep only the
         // narrow, injection-safe subset Buoy already supports and ignore exotic tmux names.
@@ -95,6 +115,7 @@ fn parse_sessions(stdout: &[u8]) -> Vec<DiscoveredSession> {
             continue;
         };
         sessions.push(DiscoveredSession {
+            socket_name: socket_name.into(),
             name: name.into(),
             windows,
             attached,
@@ -118,22 +139,12 @@ pub fn discover(transport: Transport, host: &str) -> Result<DiscoveryResult, Str
         return Err("tmux was not found on this host".into());
     }
 
+    let script = discovery_script(&tmux_path);
     let output = match transport {
-        Transport::Local => local_output(
-            &tmux_path,
-            &["-L", DEFAULT_SOCKET, "list-sessions", "-F", LIST_FORMAT],
-        )?,
-        Transport::Ssh => {
-            let script = format!(
-                "exec {tmux_path} -L {DEFAULT_SOCKET} list-sessions -F '{}'",
-                LIST_FORMAT,
-            );
-            remote_output(host, &script)?
-        }
+        Transport::Local => local_output(&script)?,
+        Transport::Ssh => remote_output(host, &script)?,
     };
-    // tmux exits 1 when no server exists. That is a valid empty discovery result; ssh exits 255
-    // for connection/auth failures, which should be visible instead of masquerading as no sessions.
-    if !output.status.success() && output.status.code() != Some(1) {
+    if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if error.is_empty() {
             "could not list tmux sessions".into()
@@ -267,13 +278,25 @@ mod tests {
 
     #[test]
     fn parses_and_sorts_discovery_rows() {
-        let rows = parse_sessions(b"old\t1\t0\t10\nnew\t3\t2\t20\nbad.name\t1\t0\t30\n");
+        let rows = parse_sessions(
+            b"default\told\t1\t0\t10\ndtcc3-7-new\tnew\t3\t2\t20\ndefault\tbad.name\t1\t0\t30\n",
+        );
         assert_eq!(
             rows.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             vec!["new", "old"]
         );
         assert_eq!(rows[0].windows, 3);
         assert_eq!(rows[0].attached, 2);
+        assert_eq!(rows[0].socket_name, "dtcc3-7-new");
+    }
+
+    #[test]
+    fn discovery_covers_shared_and_legacy_client_sockets() {
+        let script = discovery_script("/usr/bin/tmux");
+        assert!(script.contains("$buoy_dir/default"));
+        assert!(script.contains("$buoy_dir\"/dtcc*"));
+        assert!(script.contains("$buoy_dir\"/dtapp*"));
+        assert!(script.contains("$buoy_dir\"/buoy-mobile-*"));
     }
 
     #[test]

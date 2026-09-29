@@ -204,7 +204,7 @@ describe('Tauri UI: new session dialog', () => {
     finish();
   });
 
-  it('discovers and imports a session from the default tmux server', async () => {
+  it('discovers and imports sessions from ordinary and Buoy tmux sockets', async () => {
     const { check, finish } = createChecks();
     const alreadyOpen = {
       ...session(3, 'existing shell'),
@@ -216,13 +216,13 @@ describe('Tauri UI: new session dialog', () => {
       discovery: {
         tmuxPath: '/home/dev/.local/bin/tmux', tmuxVersion: [3, 7],
         sessions: [
-          { name: 'existing', windows: 2, attached: 1, created: 30 },
-          { name: 'work', windows: 3, attached: 1, created: 20 },
-          { name: 'notes', windows: 1, attached: 0, created: 10 },
+          { socketName: 'default', name: 'existing', windows: 2, attached: 1, created: 30 },
+          { socketName: 'dtcc3-7-work', name: 'work', windows: 3, attached: 1, created: 20 },
+          { socketName: 'default', name: 'notes', windows: 1, attached: 0, created: 10 },
         ],
       },
       createSessionResult: { id: 'imported-work', session: 'work', mode: 'control',
-        tmuxPath: '/home/dev/.local/bin/tmux', tmuxVersion: [3, 7], socketName: 'default' },
+        tmuxPath: '/home/dev/.local/bin/tmux', tmuxVersion: [3, 7], socketName: 'dtcc3-7-work' },
     });
     await openDialog();
     await js(`document.getElementById('f-host').value = 'dev@example.test'`);
@@ -251,10 +251,10 @@ describe('Tauri UI: new session dialog', () => {
     check(discovers.length === 1 && discovers[0]?.[1]?.kind === 'remote'
       && discovers[0]?.[1]?.host === 'dev@example.test',
     `TC-NS7 discovery targets the selected SSH host (got ${JSON.stringify(discovers)})`);
-    check(sent?.session === 'work' && sent?.socketName === 'default'
+    check(sent?.session === 'work' && sent?.socketName === 'dtcc3-7-work'
       && sent?.tmuxPath === '/home/dev/.local/bin/tmux'
       && JSON.stringify(sent?.tmuxVersion) === JSON.stringify([3, 7]),
-    `TC-NS7 import preserves the existing name/default socket and probed tmux (got ${JSON.stringify(sent)})`);
+    `TC-NS7 import preserves the discovered cross-client socket and probed tmux (got ${JSON.stringify(sent)})`);
     finish();
   });
 
@@ -274,8 +274,8 @@ describe('Tauri UI: new session dialog', () => {
       discovery: {
         tmuxPath: '/usr/bin/tmux', tmuxVersion: [3, 6],
         sessions: [
-          { name: 'work', windows: 3, attached: 1, created: 20 },
-          { name: 'notes', windows: 1, attached: 0, created: 10 },
+          { socketName: 'default', name: 'work', windows: 3, attached: 1, created: 20 },
+          { socketName: 'default', name: 'notes', windows: 1, attached: 0, created: 10 },
         ],
       },
     });

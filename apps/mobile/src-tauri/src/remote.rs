@@ -113,6 +113,7 @@ fn parse_tmux_version(value: &str) -> Option<Vec<u32>> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredSession {
+    pub socket_name: String,
     pub name: String,
     pub windows: u32,
     pub attached: u32,
@@ -130,7 +131,13 @@ pub struct DiscoveryResult {
 fn parse_discovered_sessions(stdout: &[u8]) -> Vec<DiscoveredSession> {
     let mut sessions = Vec::new();
     for line in String::from_utf8_lossy(stdout).lines() {
-        let mut fields = line.splitn(4, '\t');
+        let mut fields = line.splitn(5, '\t');
+        let Some(socket_name) = fields.next() else {
+            continue;
+        };
+        if buoy_core::validate_socket_name(socket_name).is_err() {
+            continue;
+        }
         let Some(name) = fields.next() else { continue };
         if buoy_core::validate_session_name(name).is_err() {
             continue;
@@ -145,6 +152,7 @@ fn parse_discovered_sessions(stdout: &[u8]) -> Vec<DiscoveredSession> {
             continue;
         };
         sessions.push(DiscoveredSession {
+            socket_name: socket_name.into(),
             name: name.into(),
             windows,
             attached,
@@ -160,27 +168,27 @@ fn parse_discovered_sessions(stdout: &[u8]) -> Vec<DiscoveredSession> {
     sessions
 }
 
-/// Discover sessions on the user's ordinary tmux server. This mirrors Desktop's import flow but
-/// executes over the in-process SSH connection required by iOS instead of spawning `ssh`.
+/// Discover sessions on the ordinary tmux server and every Buoy socket. The socket is part of each
+/// result so a different client can import the same remote session instead of recreating it on its
+/// own platform-specific server.
 pub async fn discover_tmux_sessions<H: client::Handler>(
     ssh: &client::Handle<H>,
 ) -> Result<DiscoveryResult, String> {
     let (tmux_path, tmux_version) = probe_tmux(ssh).await?;
-    let output = execute(
-        ssh,
-        format!(
-            "{tmux_path} -L default list-sessions -F '#{{session_name}}\t#{{session_windows}}\t#{{session_attached}}\t#{{session_created}}'"
-        ),
-        256 * 1024,
-    )
-    .await?;
+    // Keep the old Mobile prefix in the scan only so existing installs remain recoverable. New
+    // sessions use buoy-core's platform-neutral dtcc/dtapp identity.
+    let command = format!(
+        "buoy_root=${{TMUX_TMPDIR:-/tmp}}; buoy_dir=\"$buoy_root/tmux-$(id -u)\"; \
+         [ -d \"$buoy_dir\" ] || exit 0; \
+         for buoy_path in \"$buoy_dir/default\" \"$buoy_dir\"/dtcc* \"$buoy_dir\"/dtapp* \"$buoy_dir\"/buoy-mobile-*; do \
+           [ -S \"$buoy_path\" ] || continue; buoy_socket=${{buoy_path##*/}}; \
+           case \"$buoy_socket\" in default|dtcc*|dtapp*|buoy-mobile-*) ;; *) continue ;; esac; \
+           {tmux_path} -S \"$buoy_path\" list-sessions -F \"$buoy_socket\t#{{session_name}}\t#{{session_windows}}\t#{{session_attached}}\t#{{session_created}}\" 2>/dev/null || :; \
+         done"
+    );
+    let output = execute(ssh, command, 256 * 1024).await?;
     let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let no_server = output.status == Some(1)
-        || diagnostic.to_ascii_lowercase().contains("no server running");
-    if !no_server
-        && output.status != Some(0)
-        && !(output.status.is_none() && diagnostic.is_empty())
-    {
+    if output.status != Some(0) && !(output.status.is_none() && diagnostic.is_empty()) {
         return Err(if diagnostic.is_empty() {
             format!("could not list tmux sessions (status {:?})", output.status)
         } else {
@@ -190,11 +198,7 @@ pub async fn discover_tmux_sessions<H: client::Handler>(
     Ok(DiscoveryResult {
         tmux_path,
         tmux_version,
-        sessions: if no_server {
-            Vec::new()
-        } else {
-            parse_discovered_sessions(&output.stdout)
-        },
+        sessions: parse_discovered_sessions(&output.stdout),
     })
 }
 
@@ -482,7 +486,7 @@ mod tests {
     #[test]
     fn parses_and_sorts_safe_discovery_rows() {
         let sessions = parse_discovered_sessions(
-            b"old\t1\t0\t10\nnew\t3\t2\t20\nbad.name\t1\t0\t30\n",
+            b"default\told\t1\t0\t10\ndtcc3-7-new\tnew\t3\t2\t20\ndefault\tbad.name\t1\t0\t30\n",
         );
         assert_eq!(
             sessions
@@ -493,5 +497,6 @@ mod tests {
         );
         assert_eq!(sessions[0].windows, 3);
         assert_eq!(sessions[0].attached, 2);
+        assert_eq!(sessions[0].socket_name, "dtcc3-7-new");
     }
 }

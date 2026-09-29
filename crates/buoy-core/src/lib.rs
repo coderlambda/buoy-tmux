@@ -87,6 +87,23 @@ pub fn validate_socket_name(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Return the stable tmux socket used by every Buoy client for a session.
+///
+/// The name is deliberately platform-neutral: Desktop and Mobile must derive the same remote
+/// identity so either client can discover and reattach to a session created by the other. The
+/// version tag prevents an upgraded tmux client from talking to an incompatible older server.
+/// Control mode keeps one server per session; plain mode shares one server per tmux version.
+pub fn tmux_socket_name(mode: &str, version: Option<(u32, u32)>, session: &str) -> String {
+    let tag = version
+        .map(|(major, minor)| format!("{major}-{minor}"))
+        .unwrap_or_default();
+    if mode == "control" {
+        format!("dtcc{tag}-{session}")
+    } else {
+        format!("dtapp{tag}")
+    }
+}
+
 fn valid_user(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
@@ -186,5 +203,18 @@ mod tests {
         assert!(validate_socket_name("default").is_ok());
         assert!(validate_socket_name("buoy-mobile_dt-1").is_ok());
         assert!(validate_socket_name("bad;command").is_err());
+    }
+
+    #[test]
+    fn tmux_socket_identity_is_client_neutral_and_versioned() {
+        assert_eq!(
+            tmux_socket_name("control", Some((3, 7)), "dt-shared"),
+            "dtcc3-7-dt-shared"
+        );
+        assert_eq!(
+            tmux_socket_name("plain", Some((3, 7)), "dt-shared"),
+            "dtapp3-7"
+        );
+        assert!(!tmux_socket_name("control", None, "dt-shared").contains("mobile"));
     }
 }

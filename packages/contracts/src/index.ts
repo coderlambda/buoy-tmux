@@ -82,6 +82,7 @@ export interface CreateSessionResult {
 }
 
 export interface DiscoveredTmuxSession {
+  socketName: string;
   name: string;
   windows: number;
   attached: number;

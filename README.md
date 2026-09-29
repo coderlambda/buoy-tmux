@@ -80,8 +80,8 @@ Screenshots show the v0.1.4 interface with demonstration workspaces.
 
 ## Also included
 
-- **Import existing sessions:** discover local or remote tmux sessions without detaching their
-  existing clients or changing shell configuration.
+- **Shared sessions:** Desktop and Mobile discover the same local or remote tmux sessions, preserve
+  their real socket identity, and may attach concurrently without detaching existing clients.
 - **Session history:** Detach closes only Buoy's client. End saves a recovery snapshot and
   ends tmux; Restore rebuilds shells in their last directories. It does not restore process
   memory or unsaved application state.

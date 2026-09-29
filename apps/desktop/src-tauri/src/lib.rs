@@ -454,7 +454,7 @@ fn create_session_inner(app: AppHandle, state: State<AppState>, meta: CreateArgs
         mode: mode.into(),
         tmux_path: Some(tmux_path.clone()),
         tmux_version,
-        socket_name: socket_name.clone(),
+        socket_name: Some(effective_socket.clone()),
         title: meta.title.clone().or_else(|| Some(meta.host.clone())),
         order: 0,
         attach_ok: false,
@@ -657,7 +657,7 @@ fn create_session_inner(app: AppHandle, state: State<AppState>, meta: CreateArgs
     // renderer's cached copy has to follow or its next createSession would re-send the stale pair.
     Ok(json!({
         "id": id, "session": session, "mode": mode,
-        "tmuxPath": tmux_path, "tmuxVersion": tmux_version, "socketName": socket_name,
+        "tmuxPath": tmux_path, "tmuxVersion": tmux_version, "socketName": effective_socket,
     }))
 }
 
@@ -1229,9 +1229,9 @@ pub fn run() {
 
     #[cfg(not(feature = "ui-test"))]
     let builder = builder
-        // This must stay first: two app processes restoring the same persisted tmux session would
-        // both use `new-session -D`, detach one another, and make both supervisors reconnect
-        // forever. A later launch exits here and brings the already-running Buoy window forward.
+        // This must stay first: two Desktop processes must not race writes to the same local store
+        // or duplicate every backend event. Other devices remain free to attach to the same remote
+        // tmux session. A later local launch brings the already-running Buoy window forward.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             dlog!("single-instance: focusing the existing main window");
             if let Some(window) = app.get_webview_window("main") {

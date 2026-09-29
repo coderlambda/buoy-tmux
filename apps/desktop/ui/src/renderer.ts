@@ -323,8 +323,8 @@ termGate.appendChild(termGateBadge);
 termHost.appendChild(termGate);
 
 // Reconnect in-flight guard (§5): every manual reconnect path (gate badge, sidebar retry, force
-// reconnect) tears down the backend and spawns a fresh ssh. Two overlapping spawns evict each other
-// via `new-session -D`, so a double-click used to cause the very flap the supervisor tries to avoid.
+// reconnect) tears down the backend and spawns a fresh ssh. Two overlapping spawns duplicate the
+// same session's events and input, so a double-click must still collapse into one operation.
 // Cleared when the session next reports a state (connected/reconnecting/dead) or after a timeout, so
 // a lost event can't wedge the control permanently.
 const reconnectPending = new Map<string, ReturnType<typeof setTimeout>>();   // id -> timeout handle
@@ -2681,11 +2681,11 @@ discoverButton.addEventListener('click', async () => {
       view.meta.session === session.name
         && view.meta.host === host
         && (view.meta.kind || (view.meta.host ? 'remote' : 'local')) === kind
-        && view.meta.socketName === 'default'));
+        && view.meta.socketName === session.socketName));
     if (!importable.length) {
       discoveryEl.textContent = result.sessions.length
         ? 'No new sessions to import. All discovered sessions are already open.'
-        : 'No sessions found on the default tmux server.';
+        : 'No tmux sessions found.';
       return;
     }
     for (const session of importable) {
@@ -2757,7 +2757,7 @@ sessionForm.addEventListener('submit', async (event) => {
   };
   if (selectedDiscovered) {
     meta.session = selectedDiscovered.name;
-    meta.socketName = 'default';
+    meta.socketName = selectedDiscovered.socketName;
     if (discoveredTmuxPath) meta.tmuxPath = discoveredTmuxPath;
     if (discoveredTmuxVersion) meta.tmuxVersion = discoveredTmuxVersion;
   }
