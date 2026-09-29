@@ -254,4 +254,58 @@ describe('Tauri UI: mobile application shell', () => {
       'TC-M5 the restored-session password field is cleared after use');
     checks.finish();
   });
+
+  it('discovers and imports an existing remote tmux session with one-shot credentials', async () => {
+    const checks = createChecks();
+    await browser.setWindowSize(786, 1704);
+    await loadFixture([], {}, {
+      capabilities: {
+        platform: 'mobile', localShell: false, nativeTabs: true, portForwarding: true,
+        backgroundConnection: false, fileDownload: true, sshHostKeyVerification: true,
+      },
+      discovery: {
+        tmuxPath: '/opt/homebrew/bin/tmux',
+        tmuxVersion: [3, 6],
+        sessions: [{ name: 'work', windows: 3, attached: 0, created: 42 }],
+      },
+      createSessionResult: { id: 'mobile-import', ready: true },
+    });
+
+    await $('#new').click();
+    await $('#f-import-mode').click();
+    await $('#f-host').setValue('alice@vpn-host');
+    await $('#f-ssh-password').setValue('discovery-secret');
+    await $('#f-discover').click();
+    await browser.waitUntil(async () => js(`document.querySelectorAll('#tmux-discovery .discovered-session').length === 1`));
+
+    const discovery = await js(`(() => {
+      const call = window.__invocations.filter(([name]) => name === 'discover_tmux_sessions').pop();
+      return {
+        args: call?.[1],
+        modeVisible: getComputedStyle(document.getElementById('f-import-mode')).display !== 'none',
+        label: document.querySelector('#tmux-discovery .session-name')?.textContent,
+      };
+    })()`);
+    checks.check(discovery.modeVisible && discovery.label === 'work',
+      `TC-M6 mobile exposes discovered tmux sessions (got ${JSON.stringify(discovery)})`);
+    checks.check(discovery.args?.host === 'alice@vpn-host' && discovery.args?.sshPassword === 'discovery-secret',
+      'TC-M6 discovery receives the ephemeral password without persisting it');
+
+    await $('#tmux-discovery .discovered-session').click();
+    await $('#f-ok').click();
+    await browser.waitUntil(async () => js(`document.querySelectorAll('#sessions .session').length === 1`));
+    const imported = await js(`(() => {
+      const call = window.__invocations.filter(([name]) => name === 'create_session').pop();
+      return {
+        meta: call?.[1]?.meta,
+        passwordAfter: document.getElementById('f-ssh-password').value,
+      };
+    })()`);
+    checks.check(imported.meta?.session === 'work' && imported.meta?.socketName === 'default',
+      `TC-M6 import adopts the ordinary remote tmux socket (got ${JSON.stringify(imported.meta)})`);
+    checks.check(imported.meta?.tmuxPath === '/opt/homebrew/bin/tmux'
+      && imported.meta?.sshPassword === 'discovery-secret' && imported.passwordAfter === '',
+      'TC-M6 import reuses the probed tmux metadata and clears its one-shot credential');
+    checks.finish();
+  });
 });

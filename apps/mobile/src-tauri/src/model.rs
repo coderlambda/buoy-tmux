@@ -34,6 +34,10 @@ pub struct SessionMeta {
     pub tmux_path: String,
     #[serde(default)]
     pub tmux_version: Option<Vec<u32>>,
+    /// `default` adopts a user's ordinary tmux server; Buoy-created sessions use an isolated
+    /// per-session socket so their lifecycle remains independent.
+    #[serde(default)]
+    pub socket_name: String,
     #[serde(default)]
     pub order: i64,
     #[serde(default)]
@@ -69,6 +73,9 @@ impl SessionMeta {
         if self.tmux_path.trim().is_empty() {
             self.tmux_path = tmux_command();
         }
+        if buoy_core::validate_socket_name(&self.socket_name).is_err() {
+            self.socket_name = format!("buoy-mobile-{}", self.session);
+        }
         self
     }
 }
@@ -83,6 +90,7 @@ pub struct CreateArgs {
     pub mode: Option<String>,
     pub tmux_path: Option<String>,
     pub tmux_version: Option<Vec<u32>>,
+    pub socket_name: Option<String>,
     pub ssh_password: Option<String>,
 }
 
@@ -127,6 +135,7 @@ mod tests {
             title: String::new(),
             tmux_path: String::new(),
             tmux_version: None,
+            socket_name: String::new(),
             order: 0,
             color: None,
             last_tab: None,
@@ -144,5 +153,6 @@ mod tests {
         assert_eq!(session.mode, "control");
         assert_eq!(session.title, "alice@vpn-host");
         assert_eq!(session.tmux_path, "tmux");
+        assert_eq!(session.socket_name, "buoy-mobile-dt-mobile");
     }
 }

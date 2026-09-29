@@ -1,6 +1,7 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use russh::{client, ChannelMsg};
+use serde::Serialize;
 
 use crate::model::RecoveryTab;
 
@@ -107,6 +108,94 @@ fn parse_tmux_version(value: &str) -> Option<Vec<u32>> {
         .parse()
         .unwrap_or(0);
     Some(vec![major, minor])
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredSession {
+    pub name: String,
+    pub windows: u32,
+    pub attached: u32,
+    pub created: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryResult {
+    pub tmux_path: String,
+    pub tmux_version: Option<Vec<u32>>,
+    pub sessions: Vec<DiscoveredSession>,
+}
+
+fn parse_discovered_sessions(stdout: &[u8]) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let mut fields = line.splitn(4, '\t');
+        let Some(name) = fields.next() else { continue };
+        if buoy_core::validate_session_name(name).is_err() {
+            continue;
+        }
+        let Some(windows) = fields.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let Some(attached) = fields.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let Some(created) = fields.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        sessions.push(DiscoveredSession {
+            name: name.into(),
+            windows,
+            attached,
+            created,
+        });
+    }
+    sessions.sort_by(|left, right| {
+        right
+            .created
+            .cmp(&left.created)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    sessions
+}
+
+/// Discover sessions on the user's ordinary tmux server. This mirrors Desktop's import flow but
+/// executes over the in-process SSH connection required by iOS instead of spawning `ssh`.
+pub async fn discover_tmux_sessions<H: client::Handler>(
+    ssh: &client::Handle<H>,
+) -> Result<DiscoveryResult, String> {
+    let (tmux_path, tmux_version) = probe_tmux(ssh).await?;
+    let output = execute(
+        ssh,
+        format!(
+            "{tmux_path} -L default list-sessions -F '#{{session_name}}\t#{{session_windows}}\t#{{session_attached}}\t#{{session_created}}'"
+        ),
+        256 * 1024,
+    )
+    .await?;
+    let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let no_server = output.status == Some(1)
+        || diagnostic.to_ascii_lowercase().contains("no server running");
+    if !no_server
+        && output.status != Some(0)
+        && !(output.status.is_none() && diagnostic.is_empty())
+    {
+        return Err(if diagnostic.is_empty() {
+            format!("could not list tmux sessions (status {:?})", output.status)
+        } else {
+            diagnostic
+        });
+    }
+    Ok(DiscoveryResult {
+        tmux_path,
+        tmux_version,
+        sessions: if no_server {
+            Vec::new()
+        } else {
+            parse_discovered_sessions(&output.stdout)
+        },
+    })
 }
 
 pub async fn read_file<H: client::Handler>(
@@ -388,5 +477,21 @@ mod tests {
         assert_eq!(parse_tmux_version("unexpected"), None);
         assert!(safe_tmux_path("/opt/homebrew/bin/tmux"));
         assert!(!safe_tmux_path("/tmp/tmux;touch /tmp/bad"));
+    }
+
+    #[test]
+    fn parses_and_sorts_safe_discovery_rows() {
+        let sessions = parse_discovered_sessions(
+            b"old\t1\t0\t10\nnew\t3\t2\t20\nbad.name\t1\t0\t30\n",
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new", "old"],
+        );
+        assert_eq!(sessions[0].windows, 3);
+        assert_eq!(sessions[0].attached, 2);
     }
 }

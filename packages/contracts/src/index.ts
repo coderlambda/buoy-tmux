@@ -151,7 +151,7 @@ export interface TerminalAPI {
   onUploadProgress(callback: (event: UploadProgress) => void): void;
   setTheme(theme: 'dark' | 'light' | null): Promise<void>;
   listSessions(): Promise<SessionMeta[]>;
-  discoverTmuxSessions(kind: SessionKind, host: string): Promise<TmuxDiscoveryResult>;
+  discoverTmuxSessions(kind: SessionKind, host: string, sshPassword?: string): Promise<TmuxDiscoveryResult>;
   createSession(meta: CreateSessionMeta): Promise<CreateSessionResult>;
   input(id: string, data: string, win?: string | null): Promise<unknown> | void;
   resize(id: string, cols: number, rows: number): Promise<unknown> | void;

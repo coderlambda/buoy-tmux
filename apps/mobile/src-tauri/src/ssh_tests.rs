@@ -67,7 +67,9 @@ impl server::Handler for FixtureServer {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(command);
         session.channel_success(channel)?;
-        let output = if command.contains("/opt/homebrew/bin/tmux") {
+        let output = if command.contains("list-sessions") {
+            b"work\t3\t1\t20\nolder\t1\t0\t10\n".to_vec()
+        } else if command.contains("/opt/homebrew/bin/tmux") {
             b"/opt/homebrew/bin/tmux\ntmux 3.7b\n".to_vec()
         } else if command.contains("base64 -d | /bin/sh") {
             b"aGVsbG8tbW9iaWxl\n".to_vec()
@@ -146,6 +148,18 @@ async fn in_process_ssh_exec_supports_tmux_probe_and_binary_file_contract() {
     let (path, version) = crate::remote::probe_tmux(&client).await.unwrap();
     assert_eq!(path, "/opt/homebrew/bin/tmux");
     assert_eq!(version, Some(vec![3, 7]));
+
+    let discovery = crate::remote::discover_tmux_sessions(&client).await.unwrap();
+    assert_eq!(discovery.tmux_path, "/opt/homebrew/bin/tmux");
+    assert_eq!(discovery.tmux_version, Some(vec![3, 7]));
+    assert_eq!(
+        discovery
+            .sessions
+            .iter()
+            .map(|session| session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["work", "older"],
+    );
 
     let (bytes, truncated) = crate::remote::read_file(
         &client,

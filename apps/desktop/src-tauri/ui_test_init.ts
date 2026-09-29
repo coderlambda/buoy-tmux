@@ -66,6 +66,7 @@ interface CommandArgs {
   tabOrder?: string[] | null;
   tabColor?: unknown;
   tabs?: unknown[];
+  sshPassword?: string;
 }
 
 interface TestCalls {

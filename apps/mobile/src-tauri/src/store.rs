@@ -211,6 +211,7 @@ mod tests {
             title: id.into(),
             tmux_path: "tmux".into(),
             tmux_version: None,
+            socket_name: format!("buoy-mobile-dt-{id}"),
             order: 0,
             color: None,
             last_tab: None,
@@ -299,6 +300,7 @@ mod tests {
         assert!(archived.archived);
         assert_eq!(archived.archived_at, Some(1234));
         assert_eq!(archived.session, "dt-history");
+        assert_eq!(archived.socket_name, "buoy-mobile-dt-history");
         assert_eq!(archived.tmux_version, Some(vec![3, 7]));
         assert_eq!(archived.last_tab.as_deref(), Some("@2"));
         assert_eq!(archived.tab_order, vec!["@1".to_string(), "@2".to_string()]);
