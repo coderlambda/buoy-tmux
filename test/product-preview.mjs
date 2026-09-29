@@ -6,7 +6,7 @@ import { createServer } from 'vite';
 import ts from 'typescript';
 
 const bridge = 'window.__TAURI__ = { core: { invoke: async () => null } };\n' +
-  ts.transpileModule(readFileSync(new URL('../src-tauri/ui_test_init.ts', import.meta.url), 'utf8'), {
+  ts.transpileModule(readFileSync(new URL('../apps/desktop/src-tauri/ui_test_init.ts', import.meta.url), 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2019, module: ts.ModuleKind.None },
   }).outputText;
 

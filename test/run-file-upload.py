@@ -48,7 +48,7 @@ LogLevel ERROR
                 raise RuntimeError('Disposable sshd did not start')
             env = dict(os.environ, BUOY_UPLOAD_SSH_PORT=str(port),
                        BUOY_UPLOAD_SSH_KEY=str(root / 'client'))
-            subprocess.run(['cargo', 'test', '--manifest-path', 'src-tauri/Cargo.toml', '--test',
+            subprocess.run(['cargo', 'test', '-p', 'buoy', '--test',
                             'file_upload', '--', '--ignored'], cwd=repo, env=env, check=True)
         finally:
             server.terminate()

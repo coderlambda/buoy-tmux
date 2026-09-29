@@ -1,7 +1,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AppConfig, SessionMeta, SessionMode } from '../ui/src/types.js';
+import type { AppConfig, SessionMeta, SessionMode } from '../apps/desktop/ui/src/types.js';
 
 export const session = (n: number, title: string, mode: SessionMode = 'control'): SessionMeta => ({
   id: `s${n}`,

@@ -1,6 +1,6 @@
 
 // GUI test for drag-to-reorder (sidebar projects + control-mode tabs), driven by WebDriver pointer
-// input in Buoy's real Tauri webview against ui/src/renderer.ts and ui/index.html.
+// input in Buoy's real Tauri webview against apps/desktop/ui/src/renderer.ts and apps/desktop/ui/index.html.
 //
 // Why a full-GUI test: the shipped bug was that HTML5 drag-and-drop never fires in the Tauri
 // webview at all (wry overrides WKWebView's NSDraggingDestination methods for file-drop and answers

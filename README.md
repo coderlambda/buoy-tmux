@@ -171,7 +171,21 @@ and are reattached the next time the project is opened.
 
 ## Build from source
 
-Buoy uses Tauri v2 with a Rust backend and a strict TypeScript frontend.
+Buoy is a single monorepo with independent desktop and mobile application packages. Shared API
+contracts live in `packages/contracts`, while platform-neutral Rust code lives in
+`crates/buoy-core`:
+
+```text
+apps/
+  desktop/   desktop UI and Tauri runtime
+  mobile/    mobile UI and Tauri runtime
+packages/
+  contracts/ shared TypeScript API
+crates/
+  buoy-core/ shared Rust code
+```
+
+Install dependencies and launch the desktop app:
 
 ```bash
 npm ci
@@ -180,6 +194,9 @@ npm run tauri:dev
 
 Create production bundles with `npm run tauri:build`. Contributors can run the complete validation
 suite with `npm run typecheck`, `npm test`, `npm run tauri:test`, and `npm run test:ui`.
+Validate the mobile app with `npm run mobile:check` and `npm run mobile:test`; use
+`npm run mobile:ios:dev` or `npm run mobile:android:dev` for a configured device toolchain. See
+[MOBILE.md](MOBILE.md) for the mobile connection model and build details.
 The current product screenshot workflow is documented in [docs/product-screenshots.md](docs/product-screenshots.md).
 
 Implementation details and contributor references live in [DESIGN.md](DESIGN.md),

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { createTerminalInput, INPUT_CHUNK_UNITS, trackCommandText } from '../ui/src/terminalInput.js';
+import { createTerminalInput, INPUT_CHUNK_UNITS, trackCommandText } from '../apps/desktop/ui/src/terminalInput.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 5));
 async function until(predicate: () => boolean): Promise<void> {

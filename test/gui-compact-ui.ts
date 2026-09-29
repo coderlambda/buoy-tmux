@@ -14,7 +14,7 @@ async function workspace(reject = {}): Promise<void> {
   await fire('state', { id: 's1', state: 'connected' });
   await fire('state', { id: 's2', state: 'connected' });
   await fire('ready', { id: 's1' });
-  await fire('data', { id: 's1', window: '@0', data: '\u001b[32mdev@workstation\u001b[0m ~/projects/buoy\r\n$ git status --short\r\n M ui/src/renderer.ts\r\n\r\n$ npm test\r\n\u001b[32mTests passed\u001b[0m\r\n\r\n$ npm run dev\r\nLocal: http://localhost:3000\r\n\r\n$ ' });
+  await fire('data', { id: 's1', window: '@0', data: '\u001b[32mdev@workstation\u001b[0m ~/projects/buoy\r\n$ git status --short\r\n M apps/desktop/ui/src/renderer.ts\r\n\r\n$ npm test\r\n\u001b[32mTests passed\u001b[0m\r\n\r\n$ npm run dev\r\nLocal: http://localhost:3000\r\n\r\n$ ' });
 }
 
 describe('Tauri UI: compact blue workspace', () => {

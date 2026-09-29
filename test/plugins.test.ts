@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { PluginRegistry } from '../ui/src/plugins.js';
+import { PluginRegistry } from '../apps/desktop/ui/src/plugins.js';
 // The Tauri app serves ui/ ; that's the live copy of the link plugins.
 import {
   builtinLinkPlugins,
@@ -16,7 +16,7 @@ import {
   parseFileUri,
   sanitizeReconnectSnapshot,
   stripOsc8Sequences,
-} from '../ui/src/builtinPlugins.js';
+} from '../apps/desktop/ui/src/builtinPlugins.js';
 
 function reg() {
   const r = new PluginRegistry();
