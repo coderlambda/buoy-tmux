@@ -73,6 +73,20 @@ pub fn validate_session_name(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// tmux socket names are passed to `tmux -L`, so keep the same deliberately narrow alphabet as
+/// session names. `default` is used when adopting a session created outside Buoy.
+pub fn validate_socket_name(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("invalid tmux socket name".into());
+    }
+    Ok(())
+}
+
 fn valid_user(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
@@ -169,5 +183,8 @@ mod tests {
         assert!(parse_ssh_target("-oProxyCommand=bad").is_err());
         assert!(validate_session_name("dt-mobile_1").is_ok());
         assert!(validate_session_name("bad;command").is_err());
+        assert!(validate_socket_name("default").is_ok());
+        assert!(validate_socket_name("buoy-mobile_dt-1").is_ok());
+        assert!(validate_socket_name("bad;command").is_err());
     }
 }

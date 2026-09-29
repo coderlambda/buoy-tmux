@@ -9,7 +9,8 @@ Buoy Mobile is a separate **application package**, not a repository fork:
 ├── apps/desktop                 desktop package, Tauri runtime, and desktop app shell
 ├── apps/mobile                  mobile package, Tauri runtime, and native-style app shell
 ├── packages/contracts          shared TypeScript runtime/session API
-└── crates/buoy-core            shared Rust capabilities and input validation
+├── crates/buoy-core            shared Rust capabilities and input validation
+└── assets/icons                canonical Desktop/Mobile application icon set
 ```
 
 Separate packages keep store identifiers, permissions, release cadence, native projects, app-shell
@@ -64,6 +65,12 @@ On mobile, an already-connected runtime can reuse its in-memory credential witho
 A detached host that accepts SSH `none` authentication can be checked directly; password-only hosts
 must be opened first because credentials are never persisted.
 
+“Existing tmux” uses the same import workflow as Desktop: it connects to the selected host, probes
+tmux, and lists sessions on the ordinary `default` socket. An imported row persists that socket
+identity, so later launches reconnect to the existing session instead of accidentally creating a
+same-named session on Buoy's isolated mobile socket. A password entered for discovery remains
+one-shot and is cleared after the imported session connects.
+
 ## Authentication boundary
 
 There is no Buoy account, cloud session, token, or relay. VPN supplies reachability only; it does
@@ -86,6 +93,7 @@ never written to that file.
 | Remote SSH terminal | yes | yes |
 | Local shell | yes | no |
 | Remote tmux durability | yes | yes; tmux is required |
+| Import existing tmux session | yes | yes; remote default socket |
 | Native tmux tabs/control mode | yes | yes with tmux >= 3.2; plain fallback |
 | Background connection | desktop lifecycle | no; expect suspension |
 | Port forwarding | yes | yes; in-process `direct-tcpip` |
@@ -141,7 +149,12 @@ npm run mobile:test
 npm run tauri:test
 npm test
 npm run gui-mobile-shell
+npm run icons:check
 ```
+
+Desktop and Mobile both reference `assets/icons`. The generated Xcode asset catalog still requires
+physical PNG files, so every mobile native init/dev/build command synchronizes it from that canonical
+set first. `npm run icons:check` fails if a committed iOS AppIcon has drifted.
 
 The iOS Xcode project is generated at `apps/mobile/src-tauri/gen/apple`. Running it additionally
 requires the iOS Rust targets and an Apple development team/signing certificate:

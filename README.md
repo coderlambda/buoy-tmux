@@ -130,8 +130,8 @@ there is no tmux session ID to maintain manually.
 To use a tmux session that already exists on the host, enter the host and choose **Find existing
 tmux sessions**. Select a result and choose **Import**. Buoy attaches to the host's normal tmux
 server; other attached tmux clients remain connected. Remote discovery uses a non-interactive SSH
-query, so the host must already be reachable through an SSH key, agent, or another authentication
-method that does not require a password prompt.
+query. Desktop uses the host's existing SSH key/agent setup; Mobile can also use the password entered
+in its connection sheet for that discovery and the subsequent attach without storing it.
 
 ### Open a local project
 
@@ -183,6 +183,8 @@ packages/
   contracts/ shared TypeScript API
 crates/
   buoy-core/ shared Rust code
+assets/
+  icons/     canonical Desktop/Mobile app icons
 ```
 
 Install dependencies and launch the desktop app:

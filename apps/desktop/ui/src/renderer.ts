@@ -2671,7 +2671,8 @@ discoverButton.addEventListener('click', async () => {
   setIcon(discoverButton, 'loading', 'Looking for sessions…');
   setIcon(createButton, 'download', 'Select a session to import');
   try {
-    const result = await api.discoverTmuxSessions(kind, host);
+    const password = runtimeCapabilities.platform === 'mobile' ? fSshPassword.value : undefined;
+    const result = await api.discoverTmuxSessions(kind, host, password || undefined);
     if (generation !== discoveryGeneration) return;
     discoveredTmuxPath = result.tmuxPath;
     discoveredTmuxVersion = result.tmuxVersion;

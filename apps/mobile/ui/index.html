@@ -97,14 +97,17 @@
         </button>
       </header>
 
+      <div class="connection-mode" role="group" aria-label="Connection action">
+        <button id="f-create-mode" type="button" aria-pressed="true">New session</button>
+        <button id="f-import-mode" type="button" aria-pressed="false">Existing tmux</button>
+      </div>
+
       <div class="mobile-hidden-field">
         <label for="f-kind">Type</label>
         <select id="f-kind">
           <option value="remote" selected>Remote host</option>
           <option id="f-kind-local" value="local">Local shell</option>
         </select>
-        <button id="f-create-mode" type="button" aria-pressed="true">Create</button>
-        <button id="f-import-mode" type="button" aria-pressed="false">Import</button>
         <button id="f-remote" type="button" aria-pressed="true">Remote</button>
         <button id="f-local" type="button" aria-pressed="false">Local</button>
       </div>

@@ -361,7 +361,7 @@ async fn run_connection(
         }
     }
 
-    let socket = format!("buoy-mobile-{}", spec.meta.session);
+    let socket = spec.meta.socket_name.clone();
     if spec.meta.restore_pending {
         remote::restore_tmux_session(
             &ssh,
@@ -757,6 +757,60 @@ fn list_sessions(state: State<Arc<AppState>>) -> Vec<SessionMeta> {
 }
 
 #[tauri::command]
+async fn discover_tmux_sessions(
+    state: State<'_, Arc<AppState>>,
+    kind: String,
+    host: String,
+    ssh_password: Option<String>,
+) -> Result<remote::DiscoveryResult, String> {
+    if kind != "remote" {
+        return Err("mobile can only discover remote tmux sessions".into());
+    }
+    let target = buoy_core::parse_ssh_target(&host)?;
+    let user = target
+        .user
+        .ok_or_else(|| "mobile SSH requires user@host".to_string())?;
+    let endpoint = format!("{}:{}", target.host, target.port);
+    let config = client::Config {
+        inactivity_timeout: Some(Duration::from_secs(20)),
+        keepalive_interval: Some(Duration::from_secs(5)),
+        keepalive_max: 2,
+        nodelay: true,
+        ..Default::default()
+    };
+    let ssh = tokio::time::timeout(
+        Duration::from_secs(12),
+        client::connect(
+            Arc::new(config),
+            (target.host.as_str(), target.port),
+            SshHandler {
+                store: state.store.clone(),
+                endpoint,
+            },
+        ),
+    )
+    .await
+    .map_err(|_| "SSH discovery connection timed out".to_string())?
+    .map_err(|error| format!("SSH discovery connection failed: {error}"))?;
+    let ssh = tokio::time::timeout(
+        Duration::from_secs(20),
+        authenticate(ssh, user, ssh_password.as_deref()),
+    )
+    .await
+    .map_err(|_| "SSH discovery authentication timed out".to_string())??;
+    let result = tokio::time::timeout(
+        Duration::from_secs(12),
+        remote::discover_tmux_sessions(&ssh),
+    )
+    .await
+    .map_err(|_| "tmux discovery timed out".to_string())?;
+    let _ = ssh
+        .disconnect(Disconnect::ByApplication, "", "English")
+        .await;
+    result
+}
+
+#[tauri::command]
 async fn create_session(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -785,6 +839,10 @@ async fn create_session(
         format!("dt-{}", if tail.is_empty() { "mobile" } else { &tail })
     });
     buoy_core::validate_session_name(&session)?;
+    let socket_name = meta
+        .socket_name
+        .unwrap_or_else(|| format!("buoy-mobile-{session}"));
+    buoy_core::validate_socket_name(&socket_name)?;
 
     let previous = state
         .sessions
@@ -819,6 +877,7 @@ async fn create_session(
             .unwrap_or_else(|| meta.host.clone()),
         tmux_path: meta.tmux_path.unwrap_or_else(|| "tmux".into()),
         tmux_version: meta.tmux_version,
+        socket_name: socket_name.clone(),
         order,
         color: persisted.as_ref().and_then(|session| session.color.clone()),
         last_tab: persisted
@@ -866,6 +925,7 @@ async fn create_session(
         "mode": connected_meta.mode,
         "tmuxPath": connected_meta.tmux_path,
         "tmuxVersion": connected_meta.tmux_version,
+        "socketName": connected_meta.socket_name,
         "ready": true,
     }))
 }
@@ -1048,7 +1108,7 @@ async fn check_mobile_session(state: &Arc<AppState>, meta: &SessionMeta) -> Resu
     )
     .await
     .map_err(|_| "SSH authentication timed out".to_string())??;
-    let socket = format!("buoy-mobile-{}", meta.session);
+    let socket = meta.socket_name.clone();
     let open = remote::has_tmux_session(&ssh, &meta.session, &socket, &meta.tmux_path).await?;
     let _ = ssh.disconnect(Disconnect::ByApplication, "", "English").await;
     Ok(open)
@@ -1072,6 +1132,11 @@ async fn check_open_sessions(state: State<'_, Arc<AppState>>) -> Result<Vec<Sess
 #[tauri::command]
 fn set_last_active(state: State<Arc<AppState>>, id: String) {
     let _ = state.store.set_last_active(Some(id));
+}
+
+#[tauri::command]
+fn set_theme(window: tauri::Window, theme: Option<tauri::Theme>) -> Result<(), String> {
+    window.set_theme(theme).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1360,6 +1425,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_capabilities,
             list_sessions,
+            discover_tmux_sessions,
             create_session,
             session_input,
             session_resize,
@@ -1375,6 +1441,7 @@ pub fn run() {
             get_config,
             check_open_sessions,
             set_last_active,
+            set_theme,
             open_external,
             list_tunnels,
             close_tunnel,
