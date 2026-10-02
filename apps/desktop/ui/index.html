@@ -86,7 +86,7 @@
     .session .act.more { display:none; }
     .session .act.reconnect:hover { color:var(--accent); }
     /* A reconnect is in flight: dim the control and swallow clicks so a double-click can't stack
-       two backend spawns (which would evict each other via tmux `new-session -D`). */
+       two duplicate backends for the same local view. */
     .session .act.reconnect.busy, .session .retry.busy { opacity:.4; pointer-events:none; }
     .session .act.detach:hover { color:var(--fg); }
     .session .act.kill:hover { color:#f38ba8; }

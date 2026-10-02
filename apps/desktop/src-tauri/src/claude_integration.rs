@@ -641,7 +641,6 @@ fn remote_tmux_script_inner(
     let posix_integration_b64 = crate::validation::base64_encode(POSIX_INTEGRATION.as_bytes());
     let fish_integration_b64 = crate::validation::base64_encode(FISH_INTEGRATION.as_bytes());
     let cc = if control { " -CC" } else { "" };
-    let detach = if control { " -D" } else { "" };
     format!(
         r#"buoy_bin="${{XDG_CACHE_HOME:-$HOME/.cache}}/buoy/bin"
 buoy_claude="$buoy_bin/claude"
@@ -709,7 +708,7 @@ export BUOY_TERMINAL BUOY_SESSION_ID BUOY_SHELL_LAUNCHER BUOY_REAL_SHELL BUOY_TM
 LC_ALL=C.UTF-8
 export LC_ALL
 {recovery}
-exec {tmux_path}{cc} -L {socket} new-session{detach} -A -s {session} \; set-option -g focus-events on \; set-environment -g PATH "$PATH" \; set-environment -g BUOY_TERMINAL 1 \; set-environment -g BUOY_SESSION_ID "$BUOY_SESSION_ID" \; set-environment -g BUOY_SHELL_LAUNCHER "$BUOY_SHELL_LAUNCHER" \; set-environment -g BUOY_REAL_SHELL "$BUOY_REAL_SHELL" \; set-environment -g BUOY_TMUX_BIN "$BUOY_TMUX_BIN" \; set-environment -g SHELL "$BUOY_REAL_SHELL" \; set-option -g default-shell "$BUOY_REAL_SHELL" \; set-option -g default-command 'if [ -x "$BUOY_SHELL_LAUNCHER" ]; then exec "$BUOY_SHELL_LAUNCHER"; else exec "$BUOY_REAL_SHELL" -l; fi'"#
+exec {tmux_path}{cc} -L {socket} new-session -A -s {session} \; set-option -g focus-events on \; set-environment -g PATH "$PATH" \; set-environment -g BUOY_TERMINAL 1 \; set-environment -g BUOY_SESSION_ID "$BUOY_SESSION_ID" \; set-environment -g BUOY_SHELL_LAUNCHER "$BUOY_SHELL_LAUNCHER" \; set-environment -g BUOY_REAL_SHELL "$BUOY_REAL_SHELL" \; set-environment -g BUOY_TMUX_BIN "$BUOY_TMUX_BIN" \; set-environment -g SHELL "$BUOY_REAL_SHELL" \; set-option -g default-shell "$BUOY_REAL_SHELL" \; set-option -g default-command 'if [ -x "$BUOY_SHELL_LAUNCHER" ]; then exec "$BUOY_SHELL_LAUNCHER"; else exec "$BUOY_REAL_SHELL" -l; fi'"#
     )
 }
 
@@ -1006,7 +1005,8 @@ mod tests {
         assert!(script.contains("BUOY_SESSION_ID=dev"));
         assert!(script.contains("BUOY_TMUX_BIN=.local/bin/tmux"));
         assert!(script.contains("SHELL=$BUOY_SHELL_LAUNCHER"));
-        assert!(script.contains("exec .local/bin/tmux -CC -L dtcc3-7 new-session -D -A -s dev"));
+        assert!(script.contains("exec .local/bin/tmux -CC -L dtcc3-7 new-session -A -s dev"));
+        assert!(!script.contains("new-session -D"));
         assert!(script.contains("set-environment -g PATH \"$PATH\""));
         assert!(script.contains("set-environment -g BUOY_TERMINAL 1"));
         assert!(script.contains("set-environment -g BUOY_TMUX_BIN \"$BUOY_TMUX_BIN\""));

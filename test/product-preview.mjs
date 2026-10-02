@@ -35,8 +35,8 @@ function fixture() {
       files: { 'docs/plan.md': file(markdown), '/srv/atlas/docs/plan.md': file(markdown),
         'reports/preview.html': file(html), '/srv/atlas/reports/preview.html': file(html) },
       discovery: { tmuxPath: '/usr/bin/tmux', tmuxVersion: [3, 6], sessions: [
-        { name: 'atlas-api', windows: 3, attached: 1, created: 20 },
-        { name: 'build-tools', windows: 2, attached: 0, created: 10 },
+        { socketName: 'default', name: 'atlas-api', windows: 3, attached: 1, created: 20 },
+        { socketName: 'default', name: 'build-tools', windows: 2, attached: 0, created: 10 },
       ] },
       uploadReport: { directory: '/srv/atlas', cancelled: false, warnings: [], items: [
         { name: 'reference.png', status: 'uploaded', detail: '', inserted: true },

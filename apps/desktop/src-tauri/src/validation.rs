@@ -280,16 +280,11 @@ pub fn build_local_tmux_args(raw_session: &str, tmux_path: &str, socket: &str) -
     Ok(args)
 }
 
-/// Local control-mode (-CC) argv: same shape as build_local_tmux_args with -CC before -L and -D on
-/// new-session (so a second client takes over rather than sharing, matching the ssh path).
+/// Local control-mode (-CC) argv: same shape as build_local_tmux_args with -CC before -L. Do not
+/// use `-D`: another Buoy client may be attached to this shared session.
 pub fn build_local_control_mode_args(raw_session: &str, tmux_path: &str, socket: &str) -> Result<Vec<String>> {
     let mut args = build_local_tmux_args(raw_session, tmux_path, socket)?;
     args.insert(0, "-CC".into());
-    if socket != "default" {
-        if let Some(ns) = args.iter().position(|a| a == "new-session") {
-            args.insert(ns + 1, "-D".into());
-        }
-    }
     Ok(args)
 }
 
@@ -498,7 +493,8 @@ mod tests {
         let dd = a.iter().position(|x| x == "--").unwrap();
         assert_eq!(a[dd + 1], "me@h");
         let script = remote_script(&a);
-        assert!(script.contains("exec /t -CC -L dtcc3-7 new-session -D -A -s dev"));
+        assert!(script.contains("exec /t -CC -L dtcc3-7 new-session -A -s dev"));
+        assert!(!script.contains("new-session -D"));
         assert!(script.contains("set-option -g focus-events on"));
         assert!(script.contains("set-environment -g BUOY_TERMINAL 1"));
     }
@@ -521,12 +517,12 @@ mod tests {
         assert!(build_local_tmux_args("dt-x", "tmux", "so;ck").is_err(), "bad socket rejected");
     }
 
-    // TC-V-L2 local control mode: -CC precedes -L, new-session takes -D (take over, don't share).
+    // TC-V-L2 local control mode: -CC precedes -L and existing clients stay attached.
     #[test]
     fn tc_v_local_control_mode_args() {
         let a = build_local_control_mode_args("dt-x", "tmux", "dtcc3-6-dt-x").unwrap();
         assert_eq!(a, [
-            "-CC", "-L", "dtcc3-6-dt-x", "new-session", "-D", "-A", "-s", "dt-x", ";",
+            "-CC", "-L", "dtcc3-6-dt-x", "new-session", "-A", "-s", "dt-x", ";",
             "set-option", "-g", "focus-events", "on",
         ]);
     }

@@ -240,7 +240,7 @@ mod tests {
         let default_command = "if [ -x \"$BUOY_SHELL_LAUNCHER\" ]; then exec \"$BUOY_SHELL_LAUNCHER\"; else exec \"$BUOY_REAL_SHELL\" -l; fi";
         assert_eq!(s.program, "/opt/homebrew/bin/tmux");
         assert_eq!(s.args, [
-            "-CC", "-L", "dtcc3-6-dt-x", "new-session", "-D", "-A", "-s", "dt-x", ";",
+            "-CC", "-L", "dtcc3-6-dt-x", "new-session", "-A", "-s", "dt-x", ";",
             "set-option", "-g", "focus-events", "on", ";", "set-environment", "-g", "PATH",
             &crate::claude_integration::path_with_local_shim(&crate::augmented_path()), ";",
             "set-environment", "-g", "BUOY_TERMINAL", "1", ";", "set-environment", "-g",

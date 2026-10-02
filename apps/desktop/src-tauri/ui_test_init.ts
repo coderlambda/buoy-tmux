@@ -35,7 +35,7 @@ interface TestBackend {
   discovery?: {
     tmuxPath: string;
     tmuxVersion?: number[];
-    sessions: Array<{ name: string; windows: number; attached: number; created: number }>;
+    sessions: Array<{ socketName: string; name: string; windows: number; attached: number; created: number }>;
   };
   echoInput?: boolean;
   rejectCreateWithoutPassword?: boolean;

@@ -266,7 +266,7 @@ describe('Tauri UI: mobile application shell', () => {
       discovery: {
         tmuxPath: '/opt/homebrew/bin/tmux',
         tmuxVersion: [3, 6],
-        sessions: [{ name: 'work', windows: 3, attached: 0, created: 42 }],
+        sessions: [{ socketName: 'dtcc3-6-work', name: 'work', windows: 3, attached: 0, created: 42 }],
       },
       createSessionResult: { id: 'mobile-import', ready: true },
     });
@@ -301,8 +301,8 @@ describe('Tauri UI: mobile application shell', () => {
         passwordAfter: document.getElementById('f-ssh-password').value,
       };
     })()`);
-    checks.check(imported.meta?.session === 'work' && imported.meta?.socketName === 'default',
-      `TC-M6 import adopts the ordinary remote tmux socket (got ${JSON.stringify(imported.meta)})`);
+    checks.check(imported.meta?.session === 'work' && imported.meta?.socketName === 'dtcc3-6-work',
+      `TC-M6 import adopts the discovered cross-client tmux socket (got ${JSON.stringify(imported.meta)})`);
     checks.check(imported.meta?.tmuxPath === '/opt/homebrew/bin/tmux'
       && imported.meta?.sshPassword === 'discovery-secret' && imported.passwordAfter === '',
       'TC-M6 import reuses the probed tmux metadata and clears its one-shot credential');

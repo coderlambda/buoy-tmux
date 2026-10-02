@@ -323,8 +323,8 @@ termGate.appendChild(termGateBadge);
 termHost.appendChild(termGate);
 
 // Reconnect in-flight guard (§5): every manual reconnect path (gate badge, sidebar retry, force
-// reconnect) tears down the backend and spawns a fresh ssh. Two overlapping spawns evict each other
-// via `new-session -D`, so a double-click used to cause the very flap the supervisor tries to avoid.
+// reconnect) tears down the backend and spawns a fresh ssh. Two overlapping spawns duplicate the
+// same session's events and input, so a double-click must still collapse into one operation.
 // Cleared when the session next reports a state (connected/reconnecting/dead) or after a timeout, so
 // a lost event can't wedge the control permanently.
 const reconnectPending = new Map<string, ReturnType<typeof setTimeout>>();   // id -> timeout handle
@@ -929,6 +929,7 @@ function connectSession(v: View): Promise<void> {
     if (v.meta.tmuxPath) createMeta.tmuxPath = v.meta.tmuxPath;
     if (v.meta.tmuxVersion) createMeta.tmuxVersion = v.meta.tmuxVersion;
     if (v.meta.socketName) createMeta.socketName = v.meta.socketName;
+    if (v.meta.tmuxCreatedAt) createMeta.tmuxCreatedAt = v.meta.tmuxCreatedAt;
     try {
       let res;
       try {
@@ -951,6 +952,7 @@ function connectSession(v: View): Promise<void> {
         if (res.tmuxPath) v.meta.tmuxPath = res.tmuxPath;
         if (res.tmuxVersion) { v.meta.tmuxVersion = res.tmuxVersion; v.tmuxVersion = res.tmuxVersion; }
         if (res.socketName) v.meta.socketName = res.socketName;
+        if (res.tmuxCreatedAt) v.meta.tmuxCreatedAt = res.tmuxCreatedAt;
         if (res.mode && res.mode !== v.meta.mode) {
           dbg('mount->createSession mode changed ' + v.meta.mode + ' -> ' + res.mode);
           v.meta.mode = res.mode;
@@ -2681,11 +2683,11 @@ discoverButton.addEventListener('click', async () => {
       view.meta.session === session.name
         && view.meta.host === host
         && (view.meta.kind || (view.meta.host ? 'remote' : 'local')) === kind
-        && view.meta.socketName === 'default'));
+        && view.meta.socketName === session.socketName));
     if (!importable.length) {
       discoveryEl.textContent = result.sessions.length
         ? 'No new sessions to import. All discovered sessions are already open.'
-        : 'No sessions found on the default tmux server.';
+        : 'No tmux sessions found.';
       return;
     }
     for (const session of importable) {
@@ -2695,11 +2697,15 @@ discoverButton.addEventListener('click', async () => {
       option.setAttribute('role', 'option');
       const name = document.createElement('span');
       name.className = 'session-name';
-      name.textContent = session.name;
+      name.textContent = session.title || session.name;
       const details = document.createElement('span');
       details.className = 'session-meta';
-      details.innerHTML = icon('terminal') + session.windows + (session.attached ? ' · ' + icon('globe') + session.attached : '');
-      details.title = `${session.windows} windows · ${session.attached} attached clients`;
+      details.innerHTML = session.state === 'closed'
+        ? icon('history') + `${session.windows} saved`
+        : icon('terminal') + session.windows + (session.attached ? ' · ' + icon('globe') + session.attached : '');
+      details.title = session.state === 'closed'
+        ? `${session.windows} saved windows · restore when imported`
+        : `${session.windows} windows · ${session.attached} attached clients`;
       option.append(name, details);
       option.onclick = () => {
         for (const node of discoveryEl.querySelectorAll('.discovered-session')) {
@@ -2709,7 +2715,7 @@ discoverButton.addEventListener('click', async () => {
         option.classList.add('selected');
         option.setAttribute('aria-selected', 'true');
         selectedDiscovered = session;
-        if (!titleInput.value.trim()) titleInput.value = session.name;
+        if (!titleInput.value.trim()) titleInput.value = session.title || session.name;
         setIcon(createButton, 'download', 'Import session');
       };
       discoveryEl.appendChild(option);
@@ -2757,7 +2763,12 @@ sessionForm.addEventListener('submit', async (event) => {
   };
   if (selectedDiscovered) {
     meta.session = selectedDiscovered.name;
-    meta.socketName = 'default';
+    meta.socketName = selectedDiscovered.socketName;
+    if (selectedDiscovered.created) meta.tmuxCreatedAt = selectedDiscovered.created;
+    if (selectedDiscovered.state === 'closed') {
+      meta.recoveryTabs = selectedDiscovered.recoveryTabs || [];
+      meta.restorePending = true;
+    }
     if (discoveredTmuxPath) meta.tmuxPath = discoveredTmuxPath;
     if (discoveredTmuxVersion) meta.tmuxVersion = discoveredTmuxVersion;
   }
@@ -2790,6 +2801,7 @@ sessionForm.addEventListener('submit', async (event) => {
   };
   if (meta.tmuxPath) viewMeta.tmuxPath = meta.tmuxPath;
   if (meta.tmuxVersion) viewMeta.tmuxVersion = meta.tmuxVersion;
+  if (meta.tmuxCreatedAt) viewMeta.tmuxCreatedAt = meta.tmuxCreatedAt;
   // Adopt what the backend ACTUALLY used. A local session is downgraded control -> plain on tmux
   // < 3.2, and all the way to mode 'local' (a bare pty, no tabs) when tmux isn't installed; the view
   // must know that or it would wait for %window events that never arrive.
@@ -2797,6 +2809,7 @@ sessionForm.addEventListener('submit', async (event) => {
   if (res.tmuxPath) viewMeta.tmuxPath = res.tmuxPath;
   if (res.tmuxVersion) viewMeta.tmuxVersion = res.tmuxVersion;
   if (res.socketName) viewMeta.socketName = res.socketName;
+  if (res.tmuxCreatedAt) viewMeta.tmuxCreatedAt = res.tmuxCreatedAt;
   dialog.close('ok');
   fSshPassword.value = '';
   const v = makeView(viewMeta);

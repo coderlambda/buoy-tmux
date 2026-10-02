@@ -68,7 +68,7 @@ impl server::Handler for FixtureServer {
         let command = String::from_utf8_lossy(command);
         session.channel_success(channel)?;
         let output = if command.contains("list-sessions") {
-            b"work\t3\t1\t20\nolder\t1\t0\t10\n".to_vec()
+            b"default\twork\t3\t1\t20\ndtcc3-7-older\tolder\t1\t0\t10\n".to_vec()
         } else if command.contains("/opt/homebrew/bin/tmux") {
             b"/opt/homebrew/bin/tmux\ntmux 3.7b\n".to_vec()
         } else if command.contains("base64 -d | /bin/sh") {
@@ -149,7 +149,9 @@ async fn in_process_ssh_exec_supports_tmux_probe_and_binary_file_contract() {
     assert_eq!(path, "/opt/homebrew/bin/tmux");
     assert_eq!(version, Some(vec![3, 7]));
 
-    let discovery = crate::remote::discover_tmux_sessions(&client).await.unwrap();
+    let discovery = crate::remote::discover_tmux_sessions(&client)
+        .await
+        .unwrap();
     assert_eq!(discovery.tmux_path, "/opt/homebrew/bin/tmux");
     assert_eq!(discovery.tmux_version, Some(vec![3, 7]));
     assert_eq!(
@@ -160,6 +162,8 @@ async fn in_process_ssh_exec_supports_tmux_probe_and_binary_file_contract() {
             .collect::<Vec<_>>(),
         vec!["work", "older"],
     );
+    assert_eq!(discovery.sessions[0].socket_name, "default");
+    assert_eq!(discovery.sessions[1].socket_name, "dtcc3-7-older");
 
     let (bytes, truncated) = crate::remote::read_file(
         &client,

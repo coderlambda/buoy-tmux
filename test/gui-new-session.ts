@@ -204,7 +204,7 @@ describe('Tauri UI: new session dialog', () => {
     finish();
   });
 
-  it('discovers and imports a session from the default tmux server', async () => {
+  it('discovers and imports sessions from ordinary and Buoy tmux sockets', async () => {
     const { check, finish } = createChecks();
     const alreadyOpen = {
       ...session(3, 'existing shell'),
@@ -216,13 +216,13 @@ describe('Tauri UI: new session dialog', () => {
       discovery: {
         tmuxPath: '/home/dev/.local/bin/tmux', tmuxVersion: [3, 7],
         sessions: [
-          { name: 'existing', windows: 2, attached: 1, created: 30 },
-          { name: 'work', windows: 3, attached: 1, created: 20 },
-          { name: 'notes', windows: 1, attached: 0, created: 10 },
+          { socketName: 'default', name: 'existing', windows: 2, attached: 1, created: 30 },
+          { socketName: 'dtcc3-7-work', name: 'work', windows: 3, attached: 1, created: 20 },
+          { socketName: 'default', name: 'notes', windows: 1, attached: 0, created: 10 },
         ],
       },
       createSessionResult: { id: 'imported-work', session: 'work', mode: 'control',
-        tmuxPath: '/home/dev/.local/bin/tmux', tmuxVersion: [3, 7], socketName: 'default' },
+        tmuxPath: '/home/dev/.local/bin/tmux', tmuxVersion: [3, 7], socketName: 'dtcc3-7-work' },
     });
     await openDialog();
     await js(`document.getElementById('f-host').value = 'dev@example.test'`);
@@ -251,10 +251,61 @@ describe('Tauri UI: new session dialog', () => {
     check(discovers.length === 1 && discovers[0]?.[1]?.kind === 'remote'
       && discovers[0]?.[1]?.host === 'dev@example.test',
     `TC-NS7 discovery targets the selected SSH host (got ${JSON.stringify(discovers)})`);
-    check(sent?.session === 'work' && sent?.socketName === 'default'
+    check(sent?.session === 'work' && sent?.socketName === 'dtcc3-7-work'
       && sent?.tmuxPath === '/home/dev/.local/bin/tmux'
       && JSON.stringify(sent?.tmuxVersion) === JSON.stringify([3, 7]),
-    `TC-NS7 import preserves the existing name/default socket and probed tmux (got ${JSON.stringify(sent)})`);
+    `TC-NS7 import preserves the discovered cross-client socket and probed tmux (got ${JSON.stringify(sent)})`);
+    finish();
+  });
+
+  it('imports a closed shared session with its remote recovery recipe', async () => {
+    const { check, finish } = createChecks();
+    const recoveryTabs = [
+      { window: '@1', title: 'editor', cwd: '/srv/project', shell: '/bin/zsh', lastCommand: 'codex' },
+      { window: '@2', title: 'logs', cwd: '/srv/project', shell: '/bin/zsh', lastCommand: 'tail -f app.log' },
+    ];
+    await loadFixture(baseSessions(), {}, {
+      discovery: {
+        tmuxPath: '/usr/bin/tmux', tmuxVersion: [3, 7],
+        sessions: [{
+          socketName: 'dtcc3-7-closed', name: 'closed', title: 'Shared deploy',
+          windows: 2, attached: 0, created: 42, state: 'closed', recoveryTabs,
+        }],
+      },
+      createSessionResult: {
+        id: 'restored-shared', session: 'closed', mode: 'control', tmuxPath: '/usr/bin/tmux',
+        tmuxVersion: [3, 7], socketName: 'dtcc3-7-closed', ready: true,
+      },
+    });
+    await openDialog();
+    await js(`document.getElementById('f-host').value = 'dev@example.test'`);
+    await $('#f-import-mode').click();
+    await $('#f-discover').click();
+    await browser.waitUntil(async () => js(
+      `document.querySelectorAll('#tmux-discovery .discovered-session').length === 1`));
+
+    const option = await js(`({
+      name: document.querySelector('#tmux-discovery .session-name').textContent,
+      detail: document.querySelector('#tmux-discovery .session-meta').title,
+    })`);
+    check(option.name === 'Shared deploy' && option.detail.includes('restore when imported'),
+      `TC-NS7b closed registry entry is presented as recovery, not a live client (got ${JSON.stringify(option)})`);
+    await js(`document.querySelector('#tmux-discovery .discovered-session').click()`);
+    await submitCreate();
+    await browser.waitUntil(async () => (await newSessionCalls()).length === 1);
+    const sent = (await newSessionCalls())[0]?.[1]?.meta as undefined | {
+      session?: string;
+      socketName?: string;
+      restorePending?: boolean;
+      recoveryTabs?: Array<{ window?: string; cwd?: string; lastCommand?: string }>;
+    };
+    check(sent?.session === 'closed' && sent?.socketName === 'dtcc3-7-closed'
+      && sent?.restorePending === true
+      && sent?.recoveryTabs?.length === 2
+      && sent.recoveryTabs[0]?.window === '@1' && sent.recoveryTabs[0]?.cwd === '/srv/project'
+      && sent.recoveryTabs[0]?.lastCommand === 'codex'
+      && sent.recoveryTabs[1]?.window === '@2' && sent.recoveryTabs[1]?.lastCommand === 'tail -f app.log',
+    `TC-NS7b closed import forwards the shared recovery recipe (got ${JSON.stringify(sent)})`);
     finish();
   });
 
@@ -274,8 +325,8 @@ describe('Tauri UI: new session dialog', () => {
       discovery: {
         tmuxPath: '/usr/bin/tmux', tmuxVersion: [3, 6],
         sessions: [
-          { name: 'work', windows: 3, attached: 1, created: 20 },
-          { name: 'notes', windows: 1, attached: 0, created: 10 },
+          { socketName: 'default', name: 'work', windows: 3, attached: 1, created: 20 },
+          { socketName: 'default', name: 'notes', windows: 1, attached: 0, created: 10 },
         ],
       },
     });

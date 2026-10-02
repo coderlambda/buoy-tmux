@@ -333,6 +333,16 @@ supervisor:
 > below explains why terminal-stream inference was rejected; the Tauri backend now has the required
 > out-of-band command path.
 
+Desktop and Mobile also share non-secret session identity and explicit-Close recovery data through
+the tmux host at `$HOME/.buoy/v1/sessions/<socket>/<session>.json`. Each record is schema-versioned,
+bounded, validated as untrusted input, written with mode `0600` by atomic same-directory rename,
+and held below `0700` directories. tmux remains authoritative for live sessions and windows. The
+registry contributes display titles and `active` / `closing` / `closed` / `restoring` / `deleted`
+lifecycle state; a closed record carries the shell/cwd recipe needed to import it on another client.
+Credentials, host keys, selected session/tab, custom ordering and colors stay device-local. The
+`tmuxCreatedAt` identity guard prevents metadata for an old session from decorating a later tmux
+session that reused the same socket and name.
+
 - Persist `[{ id, host, session, title, order, lastActive }]` to disk at
   `app.getPath('userData')`. **Treat this file as untrusted input on load** — re-validate
   `host`/`session` (§6) before use.
@@ -452,7 +462,7 @@ parser, window registry, reconnect supervisor, session store) is shared verbatim
   A tmux server outlives the app, so quitting Buoy (or crashing it, or updating it) no longer kills
   the work in a local shell — reopening the project reattaches to the running shell with scrollback
   and jobs intact. Local sessions also get **native tabs** for free, because control mode is the same
-  protocol locally: verified empirically that `tmux -CC new-session -A -D` on the local machine emits
+  protocol locally: verified empirically that `tmux -CC new-session -A` on the local machine emits
   the same `%begin` / `%window-add` / `%output` stream as over ssh. Reusing one implementation is the
   point: a parallel local path would drift from the remote one it is supposed to mirror.
 - **Transport is the only axis of difference** (`transport.rs`). `spawn_spec(transport, control, …)`
@@ -487,7 +497,7 @@ parser, window registry, reconnect supervisor, session store) is shared verbatim
   `#remote-fields` (it now applies to both kinds), and the sidebar subtitle shows `local shell` plus
   the tmux-version badge — its absence is the signal that this session is the non-durable fallback.
 - **Version-tagged, per-mode sockets** (`socket_name`): control → `dtcc<maj>-<min>-<session>`
-  (per-session, because two `-CC` clients on one server detach each other); plain → `dtapp<maj>-<min>`
+  (per-session lifecycle isolation, with the same socket shared across clients); plain → `dtapp<maj>-<min>`
   (shared). `session_kill` tears a local server down directly via `build_local_kill_args`
   (`tmux -L <sock> kill-session -t <name>`) instead of the ssh kill path.
 - **Local probing re-runs every time**, unlike the ssh probe. `probe_local_tmux()` walks the augmented
@@ -543,12 +553,10 @@ parser, window registry, reconnect supervisor, session store) is shared verbatim
 - `create_session(id)` is a replacement operation when that id is already live. This matters in
   `tauri dev`, where a frontend hot reload keeps Rust `AppState` alive but initializes the renderer
   again: the old backend must be closed before its replacement starts, or two reconnect supervisors
-  detach each other and duplicate terminal output.
-- **Only one Buoy process may own persisted sessions.** A second app process restoring the same
-  session also launches tmux with `new-session -D`; each client then detaches the other and both
-  supervisors back off and reattach forever. The single-instance plugin is therefore registered
-  before every other Tauri plugin. A later launch asks the existing process to show, unminimize, and
-  focus its main window, then exits before it can create a backend.
+  duplicate terminal output, topology events, and input handling.
+- **Only one local Desktop process may own its persisted store.** The single-instance plugin is
+  registered before every other Tauri plugin so two processes cannot race local metadata writes or
+  duplicate backend events. Other devices may attach to the same remote tmux session concurrently.
 - Do **not** key a corrective resize off "first `onData`": the first bytes from a fresh et
   are typically the ssh/et connection banner or et's stdout diagnostics (§5.1), **not**
   tmux's redraw, so resizing then can fire before tmux attaches. If a post-attach corrective
@@ -866,7 +874,7 @@ unit-tested collaborators, so the coordinator holds little state and each rule i
   escaping). Verified gotchas encoded once, tested in isolation.
 - **`shared/tmuxSocket` (pure): the version-tagged socket name**, the one place the major-minor
   rule lives (used by main, ssh backend, and control backend so it can't drift).
-- Launch argv (`buildControlModeSshArgs`): `ssh -tt -- host <tmux> -CC -L <sock> new-session -D -A
+- Launch argv (`buildControlModeSshArgs`): `ssh -tt -- host <tmux> -CC -L <sock> new-session -A
   -s <name>` (built on `buildSshArgs`, which validates host/session/etc.).
 - `ControlModeBackend` (per SESSION) coordinates them:
   - **Topology by reconcile, not by ad-hoc signal handling.** ANY of `%window-add/close/renamed`,
@@ -1023,7 +1031,7 @@ Existing single-session entries migrate to single-window projects (backward comp
 ### Operations (control channel)
 | Action | tmux command | Effect |
 |---|---|---|
-| Open project | `new-session -A -D -s dt-<id>` (-CC) | `%window-add` per window → tabs |
+| Open project | `new-session -A -s dt-<id>` (-CC) | `%window-add` per window → tabs |
 | New session | `new-window -t dt-<id>` | `%window-add @N` → tab + fresh xterm |
 | Switch tab | `select-window -t @N` | active window matches; show its xterm |
 | Rename tab | `rename-window -t @N "t"` | `%window-renamed` → label |

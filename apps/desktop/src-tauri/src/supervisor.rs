@@ -184,9 +184,8 @@ impl Supervisor {
         // Bump the generation BEFORE tearing down the old backend. kill() makes the old ssh exit,
         // and that exit arrives asynchronously (tmux `%exit` + reader EOF) a beat later. If we bumped
         // AFTER kill(), that exit would still see its own generation as current, pass the gate, and
-        // run on_exit() — scheduling a SECOND respawn that races this one. The two ssh control
-        // clients then evict each other forever via `new-session -D` (the force-reconnect flap loop).
-        // Bumping first means the dying backend's generation is already stale, so its exit is dropped.
+        // run on_exit() — scheduling a SECOND respawn that races this one and duplicates every
+        // event delivered to the app. Bumping first makes the dying backend stale, so it is dropped.
         let gen = self.shared.generation.fetch_add(1, Ordering::Relaxed) + 1;
         // Tear down any previous backend (so an old ssh can't keep streaming — the doubled-output
         // guard from the JS version). Its late exit is now gen-stale and ignored.
@@ -216,9 +215,8 @@ impl Supervisor {
         // Per-generation "already handled its exit" latch. A SINGLE backend death can surface twice:
         // tmux sends `%exit` (a control event) AND the reader thread then hits EOF — control_backend
         // emits BackendEvent::Exit for both. Without this latch on_exit() would run twice for one
-        // death, double-incrementing the attempt budget and scheduling TWO respawns; the two ssh
-        // control clients then evict each other forever via `new-session -D` (the force-reconnect
-        // flap loop). The generation check drops a REPLACED backend's late exit; this latch collapses
+        // death, double-incrementing the attempt budget and scheduling TWO respawns. The generation
+        // check drops a REPLACED backend's late exit; this latch collapses
         // the %exit+EOF pair from the CURRENT backend into exactly one reconnect.
         let exited = Arc::new(AtomicBool::new(false));
         let wrapped: BackendSink = Arc::new(move |ev: BackendEvent| {
@@ -254,9 +252,8 @@ impl Supervisor {
             Ok(b) => {
                 // Install the new backend, and if a concurrent spawn() already put one there, KILL the
                 // displaced one — a plain assignment would just drop it. There is no Drop impl on
-                // ControlBackend, so a dropped backend leaks its ssh child: that orphan keeps its tmux
-                // control client attached and, because it ran `new-session -D`, mutually evicts the
-                // surviving client (the connect/break flap loop). Same scope discipline as above:
+                // ControlBackend, so a dropped backend leaks its ssh child and duplicates control
+                // events and terminal input alongside the surviving client. Same scope discipline:
                 // release the guard before kill().
                 let displaced = {
                     let mut slot = self.shared.backend.lock().unwrap();
@@ -613,7 +610,7 @@ mod tests {
     // REGRESSION (force-reconnect flap): a SINGLE backend death surfaces as TWO Exit events — tmux
     // `%exit` AND the reader-thread EOF. Both hit the same generation's sink. They must collapse into
     // exactly ONE on_exit() (one attempt, one respawn); otherwise the budget double-increments and
-    // two ssh control clients race, evicting each other via `new-session -D` forever.
+    // two redundant ssh control clients race to drive the same renderer.
     #[test]
     fn tc_sup_double_exit_same_backend_reconnects_once() {
         let spawns = Arc::new(AtomicUsize::new(0));

@@ -39,6 +39,8 @@ pub struct SessionMeta {
     #[serde(default)]
     pub socket_name: String,
     #[serde(default)]
+    pub tmux_created_at: Option<u64>,
+    #[serde(default)]
     pub order: i64,
     #[serde(default)]
     pub color: Option<String>,
@@ -74,9 +76,39 @@ impl SessionMeta {
             self.tmux_path = tmux_command();
         }
         if buoy_core::validate_socket_name(&self.socket_name).is_err() {
-            self.socket_name = format!("buoy-mobile-{}", self.session);
+            self.socket_name = buoy_core::tmux_socket_name(
+                &self.mode,
+                tmux_version_pair(self.tmux_version.as_deref()),
+                &self.session,
+            );
         }
         self
+    }
+}
+
+pub fn tmux_version_pair(version: Option<&[u32]>) -> Option<(u32, u32)> {
+    version.and_then(|parts| Some((*parts.first()?, *parts.get(1).unwrap_or(&0))))
+}
+
+/// Apply the probed tmux capabilities without changing an explicitly imported socket. A newly
+/// created Mobile session starts with an unversioned derived name because probing happens after
+/// SSH authentication; once the version is known, this moves it to the same identity Desktop
+/// would have selected.
+pub fn apply_tmux_identity(meta: &mut SessionMeta, mode: &str, version: Vec<u32>) {
+    let previously_derived = meta.socket_name
+        == buoy_core::tmux_socket_name(
+            &meta.mode,
+            tmux_version_pair(meta.tmux_version.as_deref()),
+            &meta.session,
+        );
+    meta.mode = mode.into();
+    meta.tmux_version = Some(version);
+    if previously_derived {
+        meta.socket_name = buoy_core::tmux_socket_name(
+            &meta.mode,
+            tmux_version_pair(meta.tmux_version.as_deref()),
+            &meta.session,
+        );
     }
 }
 
@@ -91,6 +123,11 @@ pub struct CreateArgs {
     pub tmux_path: Option<String>,
     pub tmux_version: Option<Vec<u32>>,
     pub socket_name: Option<String>,
+    pub tmux_created_at: Option<u64>,
+    #[serde(default)]
+    pub recovery_tabs: Vec<RecoveryTab>,
+    #[serde(default)]
+    pub restore_pending: bool,
     pub ssh_password: Option<String>,
 }
 
@@ -136,6 +173,7 @@ mod tests {
             tmux_path: String::new(),
             tmux_version: None,
             socket_name: String::new(),
+            tmux_created_at: None,
             order: 0,
             color: None,
             last_tab: None,
@@ -153,6 +191,68 @@ mod tests {
         assert_eq!(session.mode, "control");
         assert_eq!(session.title, "alice@vpn-host");
         assert_eq!(session.tmux_path, "tmux");
+        assert_eq!(session.socket_name, "dtcc-dt-mobile");
+    }
+
+    #[test]
+    fn old_mobile_socket_names_remain_reconnectable() {
+        let session = SessionMeta {
+            id: "legacy".into(),
+            host: "alice@vpn-host".into(),
+            session: "dt-mobile".into(),
+            kind: remote_kind(),
+            transport: ssh_transport(),
+            mode: control_mode(),
+            title: "Legacy".into(),
+            tmux_path: tmux_command(),
+            tmux_version: Some(vec![3, 7]),
+            socket_name: "buoy-mobile-dt-mobile".into(),
+            tmux_created_at: None,
+            order: 0,
+            color: None,
+            last_tab: None,
+            tab_order: Vec::new(),
+            tab_colors: BTreeMap::new(),
+            archived: false,
+            archived_at: None,
+            detached: true,
+            recovery_tabs: Vec::new(),
+            restore_pending: false,
+        }
+        .normalize();
         assert_eq!(session.socket_name, "buoy-mobile-dt-mobile");
+    }
+
+    #[test]
+    fn probe_versions_only_client_neutral_derived_sockets() {
+        let mut derived = SessionMeta {
+            id: "new".into(),
+            host: "alice@vpn-host".into(),
+            session: "dt-shared".into(),
+            kind: remote_kind(),
+            transport: ssh_transport(),
+            mode: control_mode(),
+            title: "New".into(),
+            tmux_path: tmux_command(),
+            tmux_version: None,
+            socket_name: "dtcc-dt-shared".into(),
+            tmux_created_at: None,
+            order: 0,
+            color: None,
+            last_tab: None,
+            tab_order: Vec::new(),
+            tab_colors: BTreeMap::new(),
+            archived: false,
+            archived_at: None,
+            detached: false,
+            recovery_tabs: Vec::new(),
+            restore_pending: false,
+        };
+        apply_tmux_identity(&mut derived, "control", vec![3, 7]);
+        assert_eq!(derived.socket_name, "dtcc3-7-dt-shared");
+
+        derived.socket_name = "default".into();
+        apply_tmux_identity(&mut derived, "control", vec![3, 8]);
+        assert_eq!(derived.socket_name, "default");
     }
 }

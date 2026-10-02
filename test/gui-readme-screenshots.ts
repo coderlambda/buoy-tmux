@@ -91,9 +91,9 @@ describe('README product screenshots', () => {
         tmuxPath: '/usr/bin/tmux',
         tmuxVersion: [3, 6],
         sessions: [
-          { name: 'already-open', windows: 2, attached: 1, created: 30 },
-          { name: 'product-work', windows: 4, attached: 1, created: 20 },
-          { name: 'infrastructure', windows: 3, attached: 0, created: 10 },
+          { socketName: 'default', name: 'already-open', windows: 2, attached: 1, created: 30 },
+          { socketName: 'default', name: 'product-work', windows: 4, attached: 1, created: 20 },
+          { socketName: 'default', name: 'infrastructure', windows: 3, attached: 0, created: 10 },
         ],
       },
     });

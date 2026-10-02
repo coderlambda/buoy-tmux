@@ -74,7 +74,7 @@ fn live_reconnects_after_ssh_killed() {
     // versioned socket in the argv so we don't touch other sessions.
     let killed = Arc::new(AtomicBool::new(false));
     let k = killed.clone();
-    let pat = format!("new-session -D -A -s {}", session);
+    let pat = format!("new-session -A -s {}", session);
     let _ = std::process::Command::new("pkill").args(["-f", &pat]).status()
         .map(|s| k.store(s.success(), Ordering::Relaxed));
     eprintln!("killed ssh child (pattern {:?}) = {}", pat, killed.load(Ordering::Relaxed));
