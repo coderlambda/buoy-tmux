@@ -3,6 +3,7 @@ interface XtermBufferLine {
   translateToString(trimRight?: boolean): string;
   getCell(index: number): {
     getChars(): string;
+    getWidth(): number;
     isUnderline(): boolean | number;
   } | undefined;
 }

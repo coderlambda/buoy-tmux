@@ -300,9 +300,18 @@ cd apps/desktop/src-tauri && DT_LIVE_HOST=user@host cargo test --test <name> -- 
 
 ## Preview controls and tab neighbours
 
+- `plugins.test.ts` covers sentence punctuation on file paths, file URIs, public URLs and loopback
+  URLs, matching ranges/click targets, internal punctuation, balanced brackets, quoted literals,
+  dot directories and unchanged explicit OSC 8 targets/custom plugins.
+- `terminalLinks.test.ts` covers soft-wrapped logical lines, inclusive cell ranges, punctuation
+  on the next row, CJK/emoji widths, and separation at hard line breaks.
 - `gui-preview-tabs`: click OSC 8 file links and detected plain paths in the native WebView; check insertion immediately
   right of the source, including custom order, repeated opens, and a delayed chooser. Drag previews
   among terminals without losing their positions or persisting app-local ids.
+- Click Markdown/HTML paths followed by a sentence period: the last path character opens the
+  preview, the period does not. Browser/tunnel actions receive the cleaned URL; quoted trailing
+  periods remain part of the file target and hit region.
+  Activate a wrapped HTML path from its final row and verify the complete path reaches the viewer.
 - Close active previews and terminal windows into their left neighbour (right for the first tab),
   preserving focus on background close and when tmux reports a different fallback window.
 - Verify visible English JavaScript controls and confirmation, cancellation, pending/failure/retry,

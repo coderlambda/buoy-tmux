@@ -12,7 +12,8 @@ import type {
 
 // URL: http(s)/ftp/file, bare www., AND bare loopback host:port (localhost:3000, 127.0.0.1:8080
 // — with optional scheme + path). The bare-loopback form makes dev-server output clickable so it
-// can be port-forwarded (§18). Trailing punctuation trimmed by the char classes.
+// can be port-forwarded (§18). Prose punctuation is trimmed after matching, so dots and query
+// punctuation inside an address remain valid.
 export const URL_RE = /\b(?:https?|ftp|file):\/\/[^\s"'<>`)]+|(?:\bwww\.[^\s"'<>`)]+)|(?:\b(?:localhost|127\.0\.0\.1):\d{1,5}(?:\/[^\s"'<>`)]*)?)/g;
 
 // Path matcher. Four kinds, tried left-to-right in one alternation:
@@ -38,6 +39,43 @@ const BARE_WITH_EXT = String.raw`[\w.\-]*\w\.[A-Za-z0-9]{1,8}`;
 // 4. known extension-less names.
 const KNOWN_RE = String.raw`\b(?:${KNOWN_NAMES.join('|')})\b`;
 export const PATH_RE = new RegExp(`${SLASH_PATH}|${REL_SLASH}|${BARE_WITH_EXT}|${KNOWN_RE}`, 'g');
+
+// This heuristic applies only to auto-detected terminal text, never an explicit OSC 8 target.
+// Quotes/backticks preserve literal trailing punctuation; unmatched closing brackets belong to
+// prose, while balanced brackets can belong to a file name or URL query.
+function trimProseLink(text: string, line: string, start: number): string {
+  const quotes: Record<string, string> = { '"': '"', "'": "'", '`': '`', '“': '”', '‘': '’' };
+  const quote = quotes[line[start - 1] ?? ''];
+  if (quote) {
+    if (line[start + text.length] === quote) return text;
+    const closing = text.indexOf(quote);
+    if (closing >= 0) return text.slice(0, closing);
+  }
+  const pairs: Record<string, string> = { ']': '[', '}': '{', '）': '（', '】': '【', '》': '《', '」': '「', '』': '『' };
+  const counts = new Map<string, number>();
+  for (const char of text) {
+    if ('[]{}（）【】《》「」『』'.includes(char)) counts.set(char, (counts.get(char) ?? 0) + 1);
+  }
+  let end = text.length;
+  while (end > 0) {
+    const char = text[end - 1]!;
+    if (char === '.') {
+      let dots = end - 1;
+      while (dots > 0 && text[dots - 1] === '.') dots--;
+      // Preserve navigation segments /tmp/. and /tmp/.., but remove prose ellipses in one go.
+      if (end - dots <= 2 && (dots === 0 || text[dots - 1] === '/')) break;
+      end = dots;
+    } else if (/[,;:!?，。；：！？、…“”‘’]/.test(char)) {
+      end--;
+    } else if (pairs[char] && (counts.get(char) ?? 0) > (counts.get(pairs[char]!) ?? 0)) {
+      counts.set(char, counts.get(char)! - 1);
+      end--;
+    } else {
+      break;
+    }
+  }
+  return text.slice(0, end);
+}
 
 // Build the two default plugins. Handlers are thin — they call into ctx, which the host
 // (renderer) supplies with openExternal / copyText / setStatus / meta.
@@ -294,12 +332,14 @@ export function builtinLinkPlugins(): LinkPlugin[] {
       name: 'url',
       priority: 10,   // URLs win over paths when they'd overlap (e.g. file:///a/b)
       regex: URL_RE,
+      trimMatch: trimProseLink,
       onClick(text: string, ctx: LinkContext, mods?: LinkModifiers) { openUrlSmart(text, ctx, mods); },
     },
     {
       name: 'path',
       priority: 0,
       regex: PATH_RE,
+      trimMatch: trimProseLink,
       onClick(text: string, ctx: LinkContext) {
         // Open the path in an in-app file-viewer tab (§16): the host fetches the file's bytes
         // (remote over ssh, or local) and previews text/markdown/image with a Download button.

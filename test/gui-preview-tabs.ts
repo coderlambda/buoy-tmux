@@ -28,12 +28,12 @@ async function fixture(customOrder = ['@0', '@1', '@2'], backend = {}): Promise<
   await browser.waitUntil(async () => !!await js(`window.__testFindText('OPEN_REPORT')`));
 }
 
-async function clickLink(chooser = false, label = 'OPEN_REPORT', opens = true): Promise<void> {
+async function clickLink(chooser = false, label = 'OPEN_REPORT', opens = true, columnOffset = 2): Promise<void> {
   const point = await js(`(() => {
     const cell = window.__testFindText(${JSON.stringify(label)});
     const screen = Array.from(document.querySelectorAll('#term .xterm-screen')).find(el => el.getBoundingClientRect().width > 0).getBoundingClientRect();
     const size = window.__testTerminalState();
-    return { x: Math.round(screen.left + (cell.x + 2) * screen.width / size.cols),
+    return { x: Math.round(screen.left + (cell.x + ${columnOffset}) * screen.width / size.cols),
       y: Math.round(screen.top + (cell.y + .5) * screen.height / size.rows) };
   })()`);
   await browser.action('pointer').move({ ...point, origin: 'viewport' }).perform();
@@ -85,6 +85,65 @@ describe('Tauri UI: preview actions and neighbouring tabs', () => {
     await browser.waitUntil(async () => !!await js(`window.__testFindText('/tmp/report.html')`));
     await clickLink(false, '/tmp/report.html');
     assert.deepEqual(await order(), ['First', 'Source', 'report.html', 'Last']);
+  });
+
+  for (const filePath of ['/yitong/a.md', '/tmp/report.html']) {
+    it(`opens ${filePath} without its sentence period and excludes the period from hit testing`, async () => {
+      const contents = filePath.endsWith('.md') ? '# Markdown preview' : html;
+      await fixture(undefined, { files: { [filePath]: {
+        data_b64: Buffer.from(contents).toString('base64'), size: Buffer.byteLength(contents), truncated: false,
+      } } });
+      await fire('data', { id: 's1', window: '@1', data: `the path is ${filePath}.\r\n` });
+      await browser.waitUntil(async () => !!await js(`window.__testFindText(${JSON.stringify(filePath)})`));
+      await clickLink(false, filePath, false, filePath.length + .5);
+      assert.equal((await calls('read_remote_file')).length, 0, 'sentence punctuation is not clickable');
+      await clickLink(false, filePath, false, filePath.length - .5);
+      await browser.waitUntil(async () => (await calls('read_remote_file')).length === 1);
+      assert.equal((await calls('read_remote_file'))[0][1].path, filePath);
+      assert.equal(await active(), filePath.split('/').at(-1));
+      await $(`${previewRoot} ${filePath.endsWith('.md') ? '.fv-md' : '.fv-html'}`).waitForDisplayed();
+      assert.equal(await $(`${previewRoot} .fv-err`).isExisting(), false);
+    });
+  }
+
+  for (const [url, command] of [
+    ['https://example.com/report.html?q=a,b#section', 'open_external'],
+    ['http://localhost:3000/report.html', 'open_forwarded_url'],
+  ] as const) {
+    it(`opens the cleaned URL through ${command}`, async () => {
+      await fire('data', { id: 's1', window: '@1', data: `Preview ${url}.\r\n` });
+      // The full URL may soft-wrap on a small display; activate its visible first segment.
+      const label = url.slice(0, 24);
+      await browser.waitUntil(async () => !!await js(`window.__testFindText(${JSON.stringify(label)})`));
+      await clickLink(false, label, false);
+      await browser.waitUntil(async () => (await calls(command)).length === 1);
+      assert.equal((await calls(command))[0][1].url, url);
+    });
+  }
+
+  it('opens a complete wrapped HTML path from its last row without including the period', async () => {
+    const cols = (await js('window.__testTerminalState()')).cols;
+    const filePath = `/tmp/${'a'.repeat(cols)}.html`;
+    await fixture(undefined, { files: { [filePath]: { data_b64: Buffer.from(html).toString('base64'), size: html.length, truncated: false } } });
+    await fire('data', { id: 's1', window: '@1', data: `See ${filePath}.\r\n` });
+    await browser.waitUntil(async () => !!await js(`window.__testFindText('.html.')`));
+    assert.equal((await js(`window.__testFindText('.html.')`)).isWrapped, true);
+    await clickLink(false, '.html.', false, 5.5);
+    assert.equal((await calls('read_remote_file')).length, 0);
+    await clickLink(false, '.html.', false, 4.5);
+    await browser.waitUntil(async () => (await calls('read_remote_file')).length === 1);
+    assert.equal((await calls('read_remote_file'))[0][1].path, filePath);
+    await $(`${previewRoot} .fv-html`).waitForDisplayed();
+  });
+
+  it('keeps a literal trailing period in a quoted file path clickable', async () => {
+    const filePath = '/tmp/literal.';
+    await fixture(undefined, { files: { [filePath]: { data_b64: 'bGl0ZXJhbA==', size: 7, truncated: false } } });
+    await fire('data', { id: 's1', window: '@1', data: `Saved "${filePath}".\r\n` });
+    await browser.waitUntil(async () => !!await js(`window.__testFindText(${JSON.stringify(filePath)})`));
+    await clickLink(false, filePath, false, filePath.length - .5);
+    await browser.waitUntil(async () => (await calls('read_remote_file')).length === 1);
+    assert.equal((await calls('read_remote_file'))[0][1].path, filePath);
   });
 
   it('rejects unsupported OSC 8 schemes even with the chooser modifier', async () => {
