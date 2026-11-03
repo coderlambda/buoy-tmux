@@ -13,6 +13,7 @@ import type { TabContent } from './types.js';
 // - regex MUST be global (/g); a fresh lastIndex is used per line.
 // - onClick receives the matched text and a ctx (provided by the host).
 // - priority: higher wins when two plugins match overlapping ranges (default 0).
+// - trimMatch may remove a suffix from a regex candidate before ranges and clicks are created.
 
 export interface LinkContext {
   chooseOpen?(text: string): void;
@@ -35,6 +36,7 @@ export interface LinkPlugin {
   name: string;
   priority?: number;
   regex: RegExp;
+  trimMatch?(text: string, line: string, start: number): string;
   onClick(text: string, context: LinkContext, modifiers?: LinkModifiers): void;
 }
 
@@ -107,10 +109,14 @@ export class PluginRegistry {
       let m: RegExpExecArray | null;
       while ((m = plugin.regex.exec(line)) !== null) {
         const start = m.index;
-        const end = start + m[0].length;
         if (m[0].length === 0) { plugin.regex.lastIndex++; continue; }  // avoid zero-width loop
+        const text = plugin.trimMatch ? plugin.trimMatch(m[0], line, start) : m[0];
+        // A trimmer must return a non-empty prefix: arbitrary replacements would desync the
+        // terminal's hit region from its displayed text. Other plugins keep their exact match.
+        if (!text || !m[0].startsWith(text)) continue;
+        const end = start + text.length;
         if (!overlaps(start, end)) {
-          out.push({ start, end, text: m[0], plugin });
+          out.push({ start, end, text, plugin });
           claimed.push({ start, end });
         }
       }

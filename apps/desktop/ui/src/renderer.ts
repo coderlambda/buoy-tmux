@@ -7,6 +7,7 @@ import type { ThemePreference } from './theme.js';
 // contract (data/input/resize/ack/state) is what the rest of the UI depends on (DESIGN §7).
 import { PluginRegistry } from './plugins.js';
 import type { LinkContext } from './plugins.js';
+import { findTerminalLinks } from './terminalLinks.js';
 import * as DTBuiltinPlugins from './builtinPlugins.js';
 import {
   armTerminalInputLatency,
@@ -815,16 +816,10 @@ function makeLinkProvider(
     provideLinks(lineNumber: number, callback: (links: XtermLink[] | undefined) => void) {
       const term = getTerm();
       if (!term) { callback(undefined); return; }
-      // Read the wrapped logical line content for the given buffer row.
-      const buf = term.buffer.active;
-      const row = buf.getLine(lineNumber - 1);   // xterm passes 1-based line numbers
-      if (!row) { callback(undefined); return; }
-      const text = row.translateToString(true);
-      const matches = registry.findMatches(text);
+      const matches = findTerminalLinks(term.buffer.active, lineNumber, registry);
       if (!matches.length) { callback(undefined); return; }
       const links = matches.map((m) => ({
-        // xterm ranges are 1-based, inclusive-ish: [start.x, end.x) with y = line number.
-        range: { start: { x: m.start + 1, y: lineNumber }, end: { x: m.end + 1, y: lineNumber } },
+        range: m.range,
         text: m.text,
         decorations: { underline: true, pointerCursor: true },
         activate: (event: MouseEvent) => {

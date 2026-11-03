@@ -44,6 +44,96 @@ test('TC-PL2 detects paths', () => {
   assert.deepEqual(paths, ['/etc/hosts', '~/notes/todo.md', './src/a.js']);
 });
 
+test('sentence punctuation is excluded from detected file paths and URL ranges', () => {
+  const cases = [
+    ['the path is /yitong/a.md.', '/yitong/a.md'],
+    ['Preview /tmp/report.html...', '/tmp/report.html'],
+    ['See ~/notes/a.md,', '~/notes/a.md'],
+    ['Updated ./docs/a.md;', './docs/a.md'],
+    ['Read ../docs/a.md!', '../docs/a.md'],
+    ['Open src/main.rs.', 'src/main.rs'],
+    ['Open README.md.', 'README.md'],
+    ['报告在 /tmp/报告.html。', '/tmp/报告.html'],
+    ['Open /tmp/report.html，', '/tmp/report.html'],
+    ['Visit https://example.com/report.html.', 'https://example.com/report.html'],
+    ['Visit www.example.com/report.html,', 'www.example.com/report.html'],
+    ['Preview http://localhost:3000/report.html.', 'http://localhost:3000/report.html'],
+    ['Preview localhost:3000/report.html.', 'localhost:3000/report.html'],
+    ['Preview 127.0.0.1:8080/report.html。', '127.0.0.1:8080/report.html'],
+    ['Open file:///tmp/report.html.', 'file:///tmp/report.html'],
+    ['See [/tmp/report.html].', '/tmp/report.html'],
+    ['See https://example.com/report?q=a,b#part-1.', 'https://example.com/report?q=a,b#part-1'],
+  ];
+  for (const [line, expected] of cases) {
+    assert.ok(line && expected);
+    const matches = reg().findMatches(line);
+    assert.equal(matches.length, 1, line);
+    const match = matches[0]!;
+    assert.equal(match.text, expected, line);
+    assert.equal(match.start, line.indexOf(expected), line);
+    assert.equal(match.end, match.start + expected.length, line);
+    assert.equal(line.slice(match.start, match.end), expected, line);
+  }
+});
+
+test('link detection preserves internal punctuation, dot directories and explicitly quoted targets', () => {
+  const cases = [
+    ['/tmp/v1.2/a..md', '/tmp/v1.2/a..md'],
+    ['/tmp/a,b.html', '/tmp/a,b.html'],
+    ['/tmp/a[1].html', '/tmp/a[1].html'],
+    ['/tmp/[draft]', '/tmp/[draft]'],
+    ['/tmp/.', '/tmp/.'],
+    ['/tmp/..', '/tmp/..'],
+    ['"/tmp/file.".', '/tmp/file.'],
+    ["'/tmp/file!'.", '/tmp/file!'],
+    ['`/tmp/file.`.', '/tmp/file.'],
+    ['“/tmp/file.”。', '/tmp/file.'],
+    ['"https://example.com/file.".', 'https://example.com/file.'],
+    ['https://example.com/file%2E.', 'https://example.com/file%2E'],
+    ['https://example.com/?filter=a[b].', 'https://example.com/?filter=a[b]'],
+  ];
+  for (const [line, expected] of cases) {
+    assert.ok(line && expected);
+    assert.deepEqual(reg().findMatches(line).map(m => m.text), [expected], line);
+  }
+  // OSC 8 gives an authoritative target: never apply prose heuristics to that URI.
+  assert.equal(parseFileUri('file:///tmp/a.md.'), '/tmp/a.md.');
+  let opened = '';
+  openUrlSmart('https://example.com/path.', { openExternal: value => { opened = value; }, setStatus() {} });
+  assert.equal(opened, 'https://example.com/path.');
+});
+
+test('detected file, browser, tunnel and chooser actions receive the cleaned target', () => {
+  const opened: Array<[string, string]> = [];
+  const ctx = {
+    openViewer: (value: string) => { opened.push(['file', value]); },
+    openExternal: (value: string) => { opened.push(['browser', value]); },
+    isLoopback: (value: string) => value.startsWith('localhost:'),
+    openForwardedUrl: (value: string) => { opened.push(['tunnel', value]); },
+    chooseOpen: (value: string) => { opened.push(['chooser', value]); },
+    setStatus() {},
+  };
+  for (const [line, shift] of [
+    ['the path is /yitong/a.md.', false],
+    ['Visit https://example.com/a.html.', false],
+    ['Visit localhost:3000/a.html.', false],
+    ['Visit https://example.com/a.html.', true],
+  ] as const) {
+    const match = reg().findMatches(line)[0]!;
+    match.plugin.onClick(match.text, ctx, { shift });
+  }
+  assert.deepEqual(opened, [
+    ['file', '/yitong/a.md'], ['browser', 'https://example.com/a.html'],
+    ['tunnel', 'localhost:3000/a.html'], ['chooser', 'https://example.com/a.html'],
+  ]);
+});
+
+test('custom link plugins keep their exact match unless they opt into trimming', () => {
+  const r = reg();
+  r.registerLink({ name: 'ticket', priority: 20, regex: /BUG-\d+\./g, onClick() {} });
+  assert.deepEqual(r.findMatches('BUG-42.').map(m => m.text), ['BUG-42.']);
+});
+
 // TC-PL2b a path wrapped in a tool call — Update(/a/b/x.md) — must NOT swallow the trailing ')'
 test('TC-PL2b paren-wrapped path excludes the trailing paren', () => {
   const r = reg();
