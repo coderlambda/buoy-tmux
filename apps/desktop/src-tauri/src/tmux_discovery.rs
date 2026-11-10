@@ -264,17 +264,8 @@ fn encode_value(value: &str) -> String {
     base64_encode(value.as_bytes())
 }
 
-fn is_shell(command: &str) -> bool {
-    matches!(
-        command.rsplit('/').next().unwrap_or(command),
-        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "nu"
-    )
-}
-
 fn recovery_label(window: &RecoveryWindow) -> String {
-    if !window.command.is_empty() && !is_shell(&window.command) {
-        window.command.clone()
-    } else if !window.name.is_empty() {
+    if !window.name.is_empty() {
         window.name.clone()
     } else if !window.command.is_empty() {
         window.command.clone()
@@ -310,7 +301,9 @@ pub fn recovery_shell_block(
         format!("if ! {tmux_path} -L {socket} has-session -t {session} 2>/dev/null; then\n");
     for (index, window) in windows.iter().enumerate() {
         let cwd = encode_value(&window.cwd);
-        let label = encode_value(&recovery_label(window));
+        // -n interprets tmux formats even when passed as a quoted argv value. Escape literal '#'
+        // so a manual title such as "work #{pane_current_command}" survives repeated restores.
+        let label = encode_value(&recovery_label(window).replace('#', "##"));
         script.push_str(&format!(
             "  buoy_cwd=$(printf '%s' {cwd} | base64 -d) || exit 20\n\
              buoy_name=$(printf '%s' {label} | base64 -d) || exit 21\n\
@@ -323,6 +316,13 @@ pub fn recovery_shell_block(
         } else {
             script.push_str(&format!(
                 "  buoy_win=$({tmux_path} -L {socket} new-window -d -P -F '#{{window_id}}' -t {session} -c \"$buoy_cwd\" -n \"$buoy_name\") || exit 23\n"
+            ));
+        }
+        // -n disables automatic-rename on this window. Keep manual (and legacy) names pinned;
+        // explicitly re-enable it only when the saved window followed its running program/title.
+        if window.automatic_rename == Some(true) {
+            script.push_str(&format!(
+                "  {tmux_path} -L {socket} set-window-option -t \"$buoy_win\" automatic-rename on || exit 25\n"
             ));
         }
         if window.active {
@@ -468,12 +468,14 @@ mod tests {
                 cwd: "/tmp/a b'$HOME".into(),
                 command: "codex".into(),
                 active: false,
+                automatic_rename: Some(false),
             },
             RecoveryWindow {
                 name: "logs".into(),
                 cwd: "/var/log".into(),
                 command: "zsh".into(),
                 active: true,
+                automatic_rename: None,
             },
         ];
         let script = recovery_shell_block("/usr/bin/tmux", "default", "work", &windows).unwrap();
@@ -482,8 +484,8 @@ mod tests {
             "cwd is encoded, never shell syntax"
         );
         assert!(
-            script.contains(&encode_value("codex")),
-            "foreground command becomes the label"
+            script.contains(&encode_value("shell")),
+            "saved name takes precedence over the foreground command"
         );
         assert!(script.contains("buoy_active=$buoy_win"));
         assert!(script.contains("select-window -t \"$buoy_active\""));
@@ -510,12 +512,14 @@ mod tests {
                 cwd: "/tmp".into(),
                 command: "codex".into(),
                 active: false,
+                automatic_rename: Some(false),
             },
             RecoveryWindow {
                 name: "two".into(),
                 cwd: "/var".into(),
                 command: "zsh".into(),
                 active: true,
+                automatic_rename: None,
             },
         ];
         assert!(
@@ -564,8 +568,8 @@ mod tests {
         assert!(
             listing
                 .lines()
-                .any(|line| line.starts_with("codex\t") && line.ends_with("/tmp\t0")),
-            "non-shell command is displayed as the recovered tab name: {listing}"
+                .any(|line| line.starts_with("one\t") && line.ends_with("/tmp\t0")),
+            "manual name survives even when a non-shell command was running: {listing}"
         );
         assert!(
             listing

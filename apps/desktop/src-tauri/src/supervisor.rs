@@ -17,6 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::control_backend::{BackendConfig, BackendEvent, BackendSink, ControlBackend};
+use crate::session_store::{clean_recovery_windows, RecoveryWindow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -115,6 +116,7 @@ pub fn real_backend_factory() -> BackendFactory {
 
 struct Shared {
     backend: Mutex<Option<Box<dyn BackendHandle>>>,
+    recovery_windows: Mutex<Vec<RecoveryWindow>>,
     state: Mutex<State>,
     attempts: AtomicU32,
     intentional: AtomicBool,   // close() requested -> stop respawning
@@ -145,10 +147,12 @@ impl Supervisor {
         sleep: Arc<dyn Fn(Duration) + Send + Sync>,
         now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> Arc<Self> {
+        let recovery_windows = clean_recovery_windows(&cfg.recovery_windows);
         Arc::new(Supervisor {
             cfg, opts, factory, app_sink, state_sink, sleep, now_ms,
             shared: Arc::new(Shared {
                 backend: Mutex::new(None),
+                recovery_windows: Mutex::new(recovery_windows),
                 state: Mutex::new(State::Connecting),
                 attempts: AtomicU32::new(0),
                 intentional: AtomicBool::new(false),
@@ -186,7 +190,12 @@ impl Supervisor {
         // AFTER kill(), that exit would still see its own generation as current, pass the gate, and
         // run on_exit() — scheduling a SECOND respawn that races this one and duplicates every
         // event delivered to the app. Bumping first makes the dying backend stale, so it is dropped.
-        let gen = self.shared.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let (gen, recovery_windows) = {
+            // Serialize generation changes with snapshot updates: a callback from a dying backend
+            // must not replace the latest recipe after this reconnect has started.
+            let windows = self.shared.recovery_windows.lock().unwrap();
+            (self.shared.generation.fetch_add(1, Ordering::Relaxed) + 1, windows.clone())
+        };
         // Tear down any previous backend (so an old ssh can't keep streaming — the doubled-output
         // guard from the JS version). Its late exit is now gen-stale and ignored.
         //
@@ -201,9 +210,9 @@ impl Supervisor {
         self.shared.connected_at_ms.store(0, Ordering::Relaxed);   // this attempt hasn't reached Ready yet
         self.set_state(State::Connecting);
 
-        // Wrap the app sink: intercept Ready (=> Connected, stamp connect time) and Exit (=> reconnect
-        // or dead), forward everything else to the app. Tag by generation so a late exit from an
-        // already-replaced backend is ignored.
+        // Wrap the app sink: intercept Ready/Exit for reconnect state and retain the latest recovery
+        // recipe before forwarding it to disk. Tag by generation so a replaced backend cannot
+        // overwrite a newer connection's state or names.
         //
         // NOTE: Ready does NOT reset the attempt budget here. A connection that attaches then dies
         // within `stable_after_ms` (an expired-credential flap: ssh briefly accepts, tmux attaches,
@@ -242,13 +251,26 @@ impl Supervisor {
                         me.on_exit();
                     }
                 }
+                BackendEvent::RecoverySnapshot { windows } => {
+                    let windows = clean_recovery_windows(&windows);
+                    // Match SessionStore: a transient empty/invalid listing must not erase recovery.
+                    if windows.is_empty() { return; }
+                    {
+                        let mut latest = me.shared.recovery_windows.lock().unwrap();
+                        if gen != me.shared.generation.load(Ordering::Relaxed) { return; }
+                        *latest = windows.clone();
+                    }
+                    app_sink(BackendEvent::RecoverySnapshot { windows });
+                }
                 other => app_sink(other),
             }
         });
 
         let cols = self.shared.cols.load(Ordering::Relaxed) as u16;
         let rows = self.shared.rows.load(Ordering::Relaxed) as u16;
-        match (self.factory)(self.cfg.clone(), wrapped, cols, rows) {
+        let mut cfg = self.cfg.clone();
+        cfg.recovery_windows = recovery_windows;
+        match (self.factory)(cfg, wrapped, cols, rows) {
             Ok(b) => {
                 // Install the new backend, and if a concurrent spawn() already put one there, KILL the
                 // displaced one — a plain assignment would just drop it. There is no Drop impl on
@@ -415,6 +437,46 @@ mod tests {
     fn opts_fast() -> SupervisorOpts {
         SupervisorOpts { backoff_base_ms: 0, backoff_max_ms: 0, lifetime_attempt_cap: 3,
             stable_after_ms: 10000 }
+    }
+
+    #[test]
+    fn reconnect_uses_latest_recovery_snapshot_and_ignores_stale_or_empty_updates() {
+        let spawns = Arc::new(Mutex::new(Vec::<(Vec<RecoveryWindow>, BackendSink)>::new()));
+        let records = spawns.clone();
+        let factory: BackendFactory = Arc::new(move |cfg, sink, _, _| {
+            records.lock().unwrap().push((cfg.recovery_windows, sink.clone()));
+            Ok(Box::new(FakeBackend { sink, killed: Arc::new(AtomicBool::new(false)) }))
+        });
+        let sup = Supervisor::new(cfg(), opts_fast(), factory,
+            Arc::new(|_| {}), Arc::new(|_| {}), nosleep(), fake_clock().1);
+        sup.start(80, 24);
+        let original_sink = spawns.lock().unwrap()[0].1.clone();
+        let manual = vec![RecoveryWindow {
+            name: "My project".into(), cwd: "/tmp/project".into(), command: "claude".into(),
+            active: true, automatic_rename: Some(false),
+        }];
+        original_sink(BackendEvent::RecoverySnapshot { windows: manual.clone() });
+        original_sink(BackendEvent::RecoverySnapshot { windows: vec![] });
+        original_sink(BackendEvent::Exit);
+        for _ in 0..1000 {
+            if spawns.lock().unwrap().len() == 2 && sup.shared.backend.lock().unwrap().is_some() { break; }
+            thread::sleep(Duration::from_millis(1));
+        }
+        let current_sink = {
+            let spawns = spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 2);
+            assert!(spawns[0].0.is_empty());
+            assert_eq!(spawns[1].0, manual, "automatic reconnect uses the latest rename");
+            spawns[1].1.clone()
+        };
+        let mut automatic = manual.clone();
+        automatic[0].automatic_rename = Some(true);
+        current_sink(BackendEvent::RecoverySnapshot { windows: automatic.clone() });
+        original_sink(BackendEvent::RecoverySnapshot { windows: manual });
+        sup.force_reconnect();
+        assert_eq!(spawns.lock().unwrap()[2].0, automatic,
+            "clearing a rename persists; a stale backend cannot undo it");
+        sup.close();
     }
 
     #[test]

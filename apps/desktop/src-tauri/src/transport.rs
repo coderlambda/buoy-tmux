@@ -212,7 +212,7 @@ mod tests {
     fn remote_recovery_runs_inside_the_actual_interactive_ssh_bootstrap() {
         let windows = vec![crate::session_store::RecoveryWindow {
             name: "work".into(), cwd: "/tmp/project".into(),
-            command: "codex".into(), active: true,
+            command: "codex".into(), active: true, automatic_rename: Some(false),
         }];
         let s = spawn_spec_with_recovery(
             Transport::Ssh, true, "me@h", "dt-x", "/t", "dtcc3-7-dt-x", &[],

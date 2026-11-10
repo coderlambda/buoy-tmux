@@ -14,6 +14,7 @@ pub struct PaneRow {
     pub name: String,
     pub cwd: String,
     pub command: String,
+    pub automatic_rename: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +166,7 @@ mod tests {
         PaneRow {
             win: win.into(), pane: pane.into(),
             pane_active, win_active, name: name.into(), cwd: "/tmp".into(), command: "zsh".into(),
+            automatic_rename: Some(true),
         }
     }
 

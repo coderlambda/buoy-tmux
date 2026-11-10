@@ -22,7 +22,7 @@ pub struct RecoveryTab {
 }
 
 /// A reconstructible description of one tmux window. This is deliberately not a process
-/// checkpoint: recovery creates a shell in `cwd` and labels it with the last foreground command,
+/// checkpoint: recovery creates a shell in `cwd` and preserves the window's name and naming mode,
 /// but never re-executes an arbitrary command after a host restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +35,9 @@ pub struct RecoveryWindow {
     pub command: String,
     #[serde(default)]
     pub active: bool,
+    /// None is a legacy recipe: preserve its saved name rather than guessing whether it was manual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_rename: Option<bool>,
 }
 
 // Serialized to/from the renderer AND disk in camelCase, so the JS side reads meta.tmuxPath /
@@ -125,7 +128,7 @@ fn clean_text(s: &str, limit: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(limit).collect::<String>().trim().to_string()
 }
 
-fn clean_recovery_windows(windows: &[RecoveryWindow]) -> Vec<RecoveryWindow> {
+pub(crate) fn clean_recovery_windows(windows: &[RecoveryWindow]) -> Vec<RecoveryWindow> {
     let mut out = Vec::new();
     let mut active_seen = false;
     for window in windows.iter().take(64) {
@@ -141,6 +144,7 @@ fn clean_recovery_windows(windows: &[RecoveryWindow]) -> Vec<RecoveryWindow> {
             cwd,
             command: clean_text(&window.command, 100),
             active,
+            automatic_rename: window.automatic_rename,
         });
     }
     if !out.is_empty() && !active_seen { out[0].active = true; }
@@ -519,16 +523,19 @@ mod tests {
         assert_eq!(session.recovery_windows.len(), 2, "relative cwd is discarded");
         assert_eq!(session.recovery_windows[0].name, "agent");
         assert_eq!(session.recovery_windows[0].command, "codex");
+        assert_eq!(session.recovery_windows[0].automatic_rename, None, "old recipes remain readable");
         assert!(session.recovery_windows[0].active);
         assert!(!session.recovery_windows[1].active, "only one active window survives");
 
         store.set_recovery_windows("imported", &[
             RecoveryWindow { name: "next".into(), cwd: "/opt/work".into(),
-                command: "claude".into(), active: true },
+                command: "claude".into(), active: true, automatic_rename: Some(false) },
         ]);
         let reloaded = store.load();
         assert_eq!(reloaded[0].recovery_windows[0].cwd, "/opt/work");
         assert_eq!(reloaded[0].recovery_windows[0].command, "claude");
+        assert_eq!(reloaded[0].recovery_windows[0].name, "next");
+        assert_eq!(reloaded[0].recovery_windows[0].automatic_rename, Some(false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
