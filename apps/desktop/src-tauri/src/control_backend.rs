@@ -27,7 +27,7 @@ use crate::window_registry::{PaneRow, WindowRegistry};
 
 // Tabs keep names/paths with spaces intact. Newlines and tabs in persisted values are stripped by
 // SessionStore before they can become part of a recovery recipe.
-const LIST_FMT: &str = "#{window_id}\t#{pane_id}\t#{pane_active}\t#{window_active}\t#{window_name}\t#{pane_current_path}\t#{pane_current_command}";
+const LIST_FMT: &str = "#{window_id}\t#{pane_id}\t#{pane_active}\t#{window_active}\t#{window_name}\t#{pane_current_path}\t#{pane_current_command}\t#{automatic-rename}";
 const MAX_HISTORY: u32 = 2000;
 const MAX_BUFFER: usize = 4096;
 
@@ -321,6 +321,10 @@ impl ControlBackend {
         } else {
             g.send(format!("rename-window -t {} \"{}\"", win, clean), ReplyKind::Ignore);
         }
+        // Read back the acknowledged name AND naming mode in command order. Turning auto naming
+        // back on may not emit window-renamed (the name could already match), so don't wait for it
+        // or for the periodic poll before updating the recovery recipe.
+        g.refresh_now();
     }
 
     pub fn capture_window(&self, win: &str) {
@@ -762,9 +766,9 @@ fn capture_repaint(body: &[String], cursor_x: usize, cursor_y: usize) -> String 
     )
 }
 
-// "@win<TAB>%pane<TAB>paneActive<TAB>winActive<TAB>name<TAB>cwd<TAB>command"
+// "@win<TAB>%pane<TAB>paneActive<TAB>winActive<TAB>name<TAB>cwd<TAB>command<TAB>autoRename"
 fn parse_list_row(line: &str) -> Option<PaneRow> {
-    let mut parts = line.splitn(7, '\t');
+    let mut parts = line.splitn(8, '\t');
     let win = parts.next()?;
     let pane = parts.next()?;
     let pane_active = parts.next()?;
@@ -772,6 +776,11 @@ fn parse_list_row(line: &str) -> Option<PaneRow> {
     let name = parts.next().unwrap_or("");
     let cwd = parts.next().unwrap_or("");
     let command = parts.next().unwrap_or("");
+    let automatic_rename = match parts.next() {
+        Some("0") => Some(false),
+        Some("1") => Some(true),
+        _ => None,
+    };
     if !win.starts_with('@') || !pane.starts_with('%') { return None; }
     if pane_active != "0" && pane_active != "1" { return None; }
     if win_active != "0" && win_active != "1" { return None; }
@@ -783,6 +792,7 @@ fn parse_list_row(line: &str) -> Option<PaneRow> {
         name: name.to_string(),
         cwd: cwd.to_string(),
         command: command.to_string(),
+        automatic_rename,
     })
 }
 
@@ -795,6 +805,7 @@ fn recovery_snapshot(rows: &[PaneRow], order: &[String], active: Option<&str>) -
             cwd: latin1_to_utf8(&row.cwd),
             command: latin1_to_utf8(&row.command),
             active: active == Some(window.as_str()),
+            automatic_rename: row.automatic_rename,
         })
     }).collect()
 }
@@ -1215,13 +1226,14 @@ mod tests {
 
     #[test]
     fn parse_list_row_ok() {
-        let r = parse_list_row("@1\t%9\t1\t1\tzsh\t/tmp/a b\tcodex").unwrap();
+        let r = parse_list_row("@1\t%9\t1\t1\tzsh\t/tmp/a b\tcodex\t1").unwrap();
         assert_eq!(r.win, "@1");
         assert_eq!(r.pane, "%9");
         assert!(r.pane_active && r.win_active);
         assert_eq!(r.name, "zsh");
         assert_eq!(r.cwd, "/tmp/a b");
         assert_eq!(r.command, "codex");
+        assert_eq!(r.automatic_rename, Some(true));
     }
 
     #[test]
@@ -1233,14 +1245,16 @@ mod tests {
     #[test]
     fn recovery_snapshot_uses_each_windows_active_pane() {
         let rows = vec![
-            parse_list_row("@0\t%0\t0\t1\twork\t/tmp/wrong\ttail").unwrap(),
-            parse_list_row("@0\t%1\t1\t1\twork\t/tmp/right\tcodex").unwrap(),
-            parse_list_row("@1\t%2\t1\t0\tlogs\t/var/log\tzsh").unwrap(),
+            parse_list_row("@0\t%0\t0\t1\twork\t/tmp/wrong\ttail\t0").unwrap(),
+            parse_list_row("@0\t%1\t1\t1\twork\t/tmp/right\tcodex\t0").unwrap(),
+            parse_list_row("@1\t%2\t1\t0\tlogs\t/var/log\tzsh\t1").unwrap(),
         ];
         let snapshot = recovery_snapshot(&rows, &["@0".into(), "@1".into()], Some("@0"));
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot[0].cwd, "/tmp/right");
         assert_eq!(snapshot[0].command, "codex");
+        assert_eq!(snapshot[0].automatic_rename, Some(false));
+        assert_eq!(snapshot[1].automatic_rename, Some(true));
         assert!(snapshot[0].active);
         assert_eq!(snapshot[1].cwd, "/var/log");
         assert!(!snapshot[1].active);
